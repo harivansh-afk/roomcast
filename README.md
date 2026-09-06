@@ -52,6 +52,21 @@ The MCP equivalents are `play(..., start_seconds=1200)` and
 `seek(seconds=1200, mode="absolute")`. A failed or unconfirmed seek reports an
 error; paused playback must remain paused. `stop` also cancels a pending seek.
 
+With [subtitle control enabled](docs/subtitles.md), each new episode requests
+available subtitles on, preferring English. You can list tracks, change language,
+or turn captions off for the current episode:
+
+```sh
+roomcast subtitles
+roomcast subtitles off
+roomcast subtitles on
+roomcast subtitles --language hi
+```
+
+The MCP tool is `subtitles(enabled=True, language="en")`; call it without arguments
+to list tracks and reported player state. This needs Roomcast Player 1.3.3 or later.
+Sources without supported subtitles are reported as unavailable.
+
 An agent can use `roomcast-mcp` over stdio instead of shell access. It exposes
 search, playback, status, controls, seeking, source discovery and isolated browsing; it does not accept arbitrary source URLs,
 file paths or shell commands. Configure the client with:
@@ -154,8 +169,8 @@ first two segments of a requested media playlist are prefetched. Further segment
 are fetched when Roku asks, so the entire episode is not downloaded upfront.
 
 The full VOD playlist remains available for Roku's native seek UI, including
-positions before a requested start timestamp. Subtitle selection, recovery after
-upstream URL expiry and persistent resume positions are not implemented yet.
+positions before a requested start timestamp. Recovery after upstream URL expiry
+and persistent resume positions are not implemented yet.
 Pause/resume and stop are supported.
 A service restart ends the relay session; request playback again.
 

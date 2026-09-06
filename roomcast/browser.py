@@ -5,6 +5,7 @@ import hashlib
 import time
 
 from .fetch import validate_url
+from .subtitles import discover
 
 
 class Browser:
@@ -104,6 +105,10 @@ class Browser:
                 if key.lower() in ("referer", "origin", "user-agent")
             },
         }
+        try:
+            self.streams[key]["frame"] = response.request.frame
+        except Exception:
+            self.streams[key]["frame"] = None
 
     async def selected(self, key):
         if (
@@ -118,6 +123,12 @@ class Browser:
                 "provider": "browser",
                 "sources": [self.streams[key]["url"]],
                 "headers": self.streams[key]["headers"],
+                "subtitles": {
+                    self.streams[key]["url"]: await discover(
+                        self.streams[key].get("frame"),
+                        self.resolver.config.allowed_hosts,
+                    )
+                },
             }
         finally:
             await self.close()

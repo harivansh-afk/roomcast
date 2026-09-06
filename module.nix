@@ -12,6 +12,9 @@ let
       roku_serial = cfg.rokuSerial;
       roku_app_id = cfg.playerAppId;
       roku_seek_enabled = cfg.playerSupportsSeeking;
+      roku_subtitle_control = cfg.playerSupportsSubtitles;
+      subtitles_enabled = cfg.subtitlesOnByDefault;
+      subtitle_language = cfg.subtitleLanguage;
       lan_interface = cfg.lanInterface;
       lan_port = cfg.port;
       discovery_port = cfg.discoveryPort;
@@ -54,6 +57,21 @@ in
       type = lib.types.bool;
       default = false;
       description = "Enable timestamp commands after installing the Roomcast player. Stock Media Assistant does not implement them.";
+    };
+    playerSupportsSubtitles = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Enable subtitle control after installing Roomcast Player 1.3.3 or later.";
+    };
+    subtitlesOnByDefault = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Request available subtitles on every new Roomcast playback.";
+    };
+    subtitleLanguage = lib.mkOption {
+      type = lib.types.str;
+      default = "en";
+      description = "Preferred subtitle language; falls back to an available track at startup.";
     };
     lanInterface = lib.mkOption {
       type = lib.types.str;
@@ -105,8 +123,9 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = !cfg.playerSupportsSeeking || cfg.playerAppId != "782875";
-        message = "Roomcast timestamp commands require the optional Roomcast player, not stock Media Assistant.";
+        assertion =
+          !(cfg.playerSupportsSeeking || cfg.playerSupportsSubtitles) || cfg.playerAppId != "782875";
+        message = "Roomcast timestamp and subtitle commands require the optional Roomcast player, not stock Media Assistant.";
       }
     ];
     users.groups.roomcast = { };

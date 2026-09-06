@@ -1,8 +1,10 @@
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
+import secrets
 import socket as sockets
 import time
 from contextlib import aclosing
@@ -18,6 +20,7 @@ from .network import Network
 from .relay import Session
 from .resolver import Resolver
 from .roku import Roku
+from .subtitles import choose, language, roku_language
 from .youtube import YouTube
 
 
@@ -205,6 +208,51 @@ class Service:
                                 await self.prepare(candidate)
                             finally:
                                 self.job_state["preflight"] = candidate.preflight
+                            candidate.subtitle_tracks.extend(
+                                resolved.get("subtitles", {}).get(source, [])[:8]
+                            )
+                            subtitle_params = None
+                            if self.config.roku_subtitle_control:
+                                selected = choose(
+                                    candidate.subtitle_tracks,
+                                    self.config.subtitle_language,
+                                )
+                                if (
+                                    selected
+                                    and selected["kind"] == "file"
+                                    and self.config.subtitles_enabled
+                                ):
+                                    try:
+                                        async with asyncio.timeout(8):
+                                            await candidate.get(
+                                                candidate.register(
+                                                    selected["url"],
+                                                    role="subtitle-file",
+                                                )
+                                            )
+                                    except Exception:
+                                        candidate.subtitle_error = "The preferred subtitle file could not be loaded"
+                                        candidate.subtitle_tracks.remove(selected)
+                                        selected = choose(
+                                            [
+                                                t
+                                                for t in candidate.subtitle_tracks
+                                                if t["kind"] == "hls"
+                                            ],
+                                            self.config.subtitle_language,
+                                        )
+                                subtitle_params = self.subtitle_params(
+                                    candidate,
+                                    self.config.subtitles_enabled,
+                                    selected,
+                                    launching=True,
+                                )
+                                if (
+                                    not selected
+                                    and self.config.subtitles_enabled
+                                    and not candidate.subtitle_error
+                                ):
+                                    candidate.subtitle_error = "No supported subtitles were found for this source"
                             if start:
                                 check_position(
                                     start,
@@ -218,6 +266,11 @@ class Service:
                                 candidate.link(candidate.root),
                                 candidate.title,
                                 **({"start_seconds": start} if start else {}),
+                                **(
+                                    {"subtitles": subtitle_params}
+                                    if subtitle_params
+                                    else {}
+                                ),
                             )
                             self.job_state["state"] = "verifying"
 
@@ -351,6 +404,7 @@ class Service:
         if self.network:
             await self.network.ensure()
         result = {"job": self.job_state, "roku": await self.roku.status()}
+        result["subtitles"] = self.subtitle_status()
         if self.session:
             result["preflight"] = self.session.preflight
             result["relay"] = {
@@ -358,6 +412,216 @@ class Service:
                 "cache_bytes": self.session.cache_size,
             }
         return web.json_response(result)
+
+    def subtitle_status(self):
+        session = self.session
+        return {
+            "supported": self.config.roku_subtitle_control and session is not None,
+            "default_enabled": self.config.subtitles_enabled,
+            "preferred_language": self.config.subtitle_language,
+            "available": [
+                {key: item[key] for key in ("id", "name", "language", "kind", "forced")}
+                for item in session.subtitle_tracks
+            ]
+            if session
+            else [],
+            "requested": session.subtitle_request if session else None,
+            "player": session.subtitle_report if session else None,
+            "error": session.subtitle_error if session else None,
+        }
+
+    def subtitle_params(self, session, enabled, selected, launching=False):
+        session.subtitle_request = {
+            "request": secrets.token_hex(8),
+            "enabled": enabled,
+            "track": selected["id"] if selected else "",
+        }
+        session.subtitle_report = None
+        session.subtitle_event.clear()
+        params = {
+            "subtitleRequest": session.subtitle_request["request"],
+            "subtitlesEnabled": "true" if enabled else "false",
+            "subtitleId": selected["id"] if selected else "",
+            "subtitleName": selected["name"]
+            if selected and selected["kind"] == "hls"
+            else "",
+            "subtitleUrl": session.link(
+                session.register(selected["url"], role="subtitle-file")
+            )
+            if selected and selected["kind"] == "file"
+            else "",
+            "subtitleReportUrl": f"{self.config.public_base.rstrip('/')}/subtitle-state/{session.token}",
+        }
+        if launching:
+            params["subtitleTracks"] = json.dumps(
+                [
+                    {
+                        "Language": roku_language(t["language"]),
+                        "Description": t["name"],
+                        "TrackName": session.link(
+                            session.register(t["url"], role="subtitle-file")
+                        ),
+                    }
+                    for t in session.subtitle_tracks
+                    if t["kind"] == "file"
+                ],
+                separators=(",", ":"),
+            )
+        return params
+
+    async def subtitles(self, request):
+        if request.method == "GET":
+            return web.json_response(self.subtitle_status())
+        async with self.control_lock:
+            body = await request.json()
+            if (
+                not isinstance(body, dict)
+                or not body
+                or set(body) - {"enabled", "language", "track_id"}
+            ):
+                raise ValueError("expected enabled, language or track_id")
+            enabled = body.get("enabled", True)
+            if type(enabled) is not bool or ("language" in body and "track_id" in body):
+                raise ValueError(
+                    "enabled must be a boolean; choose language or track_id"
+                )
+            preferred = language(body["language"]) if "language" in body else None
+            if "track_id" in body and (
+                not isinstance(body["track_id"], str)
+                or not re.fullmatch(r"[a-f0-9]{16}", body["track_id"])
+            ):
+                raise ValueError("choose a track_id returned by subtitles")
+            if not self.config.roku_subtitle_control or not self.session:
+                raise ValueError(
+                    "Subtitle controls require an active Roomcast session and Roomcast Player 1.3.3 or later; enable playerSupportsSubtitles after installation"
+                )
+            if self.job and not self.job.done():
+                raise web.HTTPConflict(
+                    text="wait for playback or stop the pending request"
+                )
+            session = self.session
+            tracks = session.subtitle_tracks
+            if preferred:
+                tracks = [
+                    t
+                    for t in tracks
+                    if t["language"].split("-")[0] == preferred.split("-")[0]
+                ]
+            if "track_id" in body:
+                tracks = [t for t in tracks if t["id"] == body["track_id"]]
+            selected = choose(tracks, preferred or self.config.subtitle_language)
+            if not preferred and "track_id" not in body and session.subtitle_request:
+                selected = next(
+                    (t for t in tracks if t["id"] == session.subtitle_request["track"]),
+                    selected,
+                )
+            if not selected and (enabled or preferred or "track_id" in body):
+                raise ValueError("No matching subtitles are available for this video")
+            if self.network:
+                await self.network.ensure()
+            before = await self.roku.status()
+            if (
+                before["app_id"] != self.roku.app_id
+                or before.get("player_app_id") != self.roku.app_id
+            ):
+                raise ValueError("The Roomcast player is not active")
+            self.job = job = asyncio.create_task(
+                self.set_subtitles(session, enabled, selected)
+            )
+        try:
+            return web.json_response(await asyncio.shield(job))
+        except asyncio.CancelledError:
+            if job.cancelled():
+                raise web.HTTPConflict(
+                    text="subtitle change cancelled by stop or home"
+                ) from None
+            raise
+
+    async def set_subtitles(self, session, enabled, selected):
+        try:
+            async with asyncio.timeout(20):
+                if enabled and selected and selected["kind"] == "file":
+                    await session.get(
+                        session.register(selected["url"], role="subtitle-file")
+                    )
+                params = self.subtitle_params(session, enabled, selected)
+                await self.roku.subtitles(params)
+                await asyncio.wait_for(session.subtitle_event.wait(), 8)
+                report = session.subtitle_report
+                if not report["applied"]:
+                    raise ValueError(
+                        "The Roku player could not apply the requested subtitle track"
+                    )
+                after = await self.roku.status()
+                if (
+                    after["app_id"] != self.roku.app_id
+                    or after.get("player_app_id") != self.roku.app_id
+                ):
+                    raise ValueError("TV app changed during subtitle selection")
+                session.subtitle_error = None
+                return {"confirmed": True, **self.subtitle_status()}
+        except TimeoutError:
+            session.subtitle_error = (
+                "Subtitle change was not confirmed by the Roku player"
+            )
+            raise ValueError(session.subtitle_error) from None
+        except ValueError as error:
+            session.subtitle_error = str(error)
+            raise
+
+    async def subtitle_report(self, request):
+        session = self.session
+        address = self.network.address if self.network else self.config.roku_ip
+        if (
+            request.remote != address
+            or not session
+            or session.closed
+            or request.match_info["token"] != session.token
+            or time.monotonic() - session.created > self.config.session_seconds
+        ):
+            raise web.HTTPNotFound()
+        body = await request.json()
+        if (
+            not isinstance(body, dict)
+            or set(body)
+            != {
+                "request",
+                "enabled",
+                "track",
+                "applied",
+                "available",
+                "sequence",
+                "caption_mode",
+            }
+            or any(
+                type(body.get(k)) is not bool
+                for k in ("enabled", "applied", "available")
+            )
+            or type(body.get("sequence")) is not int
+            or not 1 <= body["sequence"] <= 1000000
+            or body.get("caption_mode")
+            not in ("On", "Off", "Instant replay", "When mute")
+        ):
+            raise ValueError("invalid subtitle report")
+        wanted = session.subtitle_request
+        if not wanted or any(
+            body[k] != wanted[k] for k in ("request", "enabled", "track")
+        ):
+            raise web.HTTPConflict(text="stale subtitle report")
+        if body["applied"] and body["enabled"] and not body["available"]:
+            raise ValueError("enabled subtitles require an available track")
+        if body["applied"] and body["caption_mode"] != (
+            "On" if body["enabled"] else "Off"
+        ):
+            raise ValueError("subtitle mode does not match the request")
+        if (
+            session.subtitle_report
+            and body["sequence"] < session.subtitle_report["sequence"]
+        ):
+            raise web.HTTPConflict(text="outdated subtitle state")
+        session.subtitle_report = body
+        session.subtitle_event.set()
+        return web.Response(status=204)
 
     async def browse(self, request):
         async with self.control_lock:
@@ -535,9 +799,13 @@ class Service:
             reason = (
                 str(error) if isinstance(error, ValueError) else type(error).__name__
             )
-            session.failure = "media delivery failed: " + reason[:200]
-            logging.warning("%s", session.failure)
-            raise web.HTTPBadGateway(text=session.failure) from None
+            failure = "media delivery failed: " + reason[:200]
+            if session.resources[key].role in ("subtitle", "subtitle-file"):
+                session.subtitle_error = failure
+            else:
+                session.failure = failure
+            logging.warning("%s", failure)
+            raise web.HTTPBadGateway(text=failure) from None
         # Roku normally requests whole HLS segments; implement a single byte range for clients that do not.
         headers = {"Cache-Control": "private, max-age=60", "Accept-Ranges": "bytes"}
         if value := request.headers.get("Range"):
@@ -594,12 +862,19 @@ async def serve(config):
             web.post("/browse", service.browse),
             web.post("/play", service.start_play),
             web.post("/seek", service.seek),
+            web.get("/subtitles", service.subtitles),
+            web.post("/subtitles", service.subtitles),
             web.post("/youtube/pair", service.pair_youtube),
             web.post("/command/{command}", service.command),
         ]
     )
-    media = web.Application(middlewares=[errors], client_max_size=1024)
-    media.add_routes([web.get("/media/{token}/{key}", service.media)])
+    media = web.Application(middlewares=[errors], client_max_size=4096)
+    media.add_routes(
+        [
+            web.get("/media/{token}/{key}", service.media),
+            web.post("/subtitle-state/{token}", service.subtitle_report),
+        ]
+    )
     runners = [
         web.AppRunner(control, access_log=None),
         web.AppRunner(media, access_log=None),

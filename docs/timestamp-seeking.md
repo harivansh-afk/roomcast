@@ -94,3 +94,7 @@ start, forward/backward seeks, seeking to zero, a paused seek followed by resume
 native remote scrubbing before the start offset, and audio/video continuity on
 both split fMP4 and muxed HLS. This change has not been installed or tested on the
 TV; no live playback was interrupted for its development.
+
+Roomcast Player 1.3.3 also adds [subtitle controls](subtitles.md). Enable
+`playerSupportsSubtitles` after installing that version to request captions on
+by default and expose language/on/off control.

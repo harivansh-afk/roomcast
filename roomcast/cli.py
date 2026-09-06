@@ -31,6 +31,11 @@ def main():
     sub.add_parser("status")
     sub.add_parser("sources")
     sub.add_parser("pair-youtube")
+    subtitles = sub.add_parser("subtitles")
+    subtitles.add_argument("mode", nargs="?", choices=("on", "off"))
+    subtitle_track = subtitles.add_mutually_exclusive_group()
+    subtitle_track.add_argument("--language")
+    subtitle_track.add_argument("--track", dest="track_id")
     search = sub.add_parser("search")
     search.add_argument("query")
     search.add_argument("--source", default="cinejoy")
@@ -85,6 +90,16 @@ def main():
             },
             None,
         )
+    elif args.action == "subtitles":
+        data = {
+            key: getattr(args, key)
+            for key in ("language", "track_id")
+            if getattr(args, key) is not None
+        }
+        if args.mode is not None:
+            data["enabled"] = args.mode == "on"
+        method, path, params = "POST" if data else "GET", "/subtitles", None
+        data = data or None
     elif args.action == "search":
         method, path, data, params = (
             "GET",
