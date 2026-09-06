@@ -10,10 +10,13 @@ let
     builtins.toJSON {
       roku_ip = cfg.rokuAddress;
       roku_serial = cfg.rokuSerial;
+      media_port = cfg.backendPort;
       public_base = "http://${cfg.lanAddress}:${toString cfg.port}";
       chromium = "${pkgs.chromium}/bin/chromium";
       ffmpeg = "${pkgs.ffmpeg-headless}/bin/ffmpeg";
       max_height = cfg.maxHeight;
+      allowed_hosts = cfg.allowedMediaHosts;
+      site_url = cfg.siteUrl;
     }
   );
   rule = "-s ${cfg.rokuAddress} -d ${cfg.lanAddress} -p tcp --dport ${toString cfg.port} -j ACCEPT";
@@ -25,12 +28,37 @@ in
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix { };
     };
-    rokuAddress = lib.mkOption { type = lib.types.str; };
-    rokuSerial = lib.mkOption { type = lib.types.str; };
-    lanAddress = lib.mkOption { type = lib.types.str; };
+    rokuAddress = lib.mkOption {
+      type = lib.types.str;
+      description = "Reserved IPv4 address of the target Roku.";
+    };
+    rokuSerial = lib.mkOption {
+      type = lib.types.str;
+      description = "Expected Roku serial number, verified before control commands.";
+    };
+    lanAddress = lib.mkOption {
+      type = lib.types.str;
+      description = "Reserved local IPv4 address reachable from the Roku.";
+    };
     port = lib.mkOption {
       type = lib.types.port;
       default = 18795;
+      description = "LAN media port, accepted only from the configured Roku address.";
+    };
+    backendPort = lib.mkOption {
+      type = lib.types.port;
+      default = 18796;
+      description = "Loopback media backend port; separate from the LAN listener.";
+    };
+    siteUrl = lib.mkOption {
+      type = lib.types.str;
+      default = "https://cinejoy.to";
+      description = "Origin of a site compatible with the Cinejoy resolver, for domain migrations. This does not add support for arbitrary website layouts.";
+    };
+    allowedMediaHosts = lib.mkOption {
+      type = lib.types.nullOr (lib.types.listOf lib.types.str);
+      default = null;
+      description = "Optional exact media hostname allowlist. Null permits public HTTPS hosts discovered by the resolver; private DNS answers and literal IP URLs are always rejected.";
     };
     maxHeight = lib.mkOption {
       type = lib.types.enum [
@@ -42,6 +70,10 @@ in
   };
   config = lib.mkIf cfg.enable {
     assertions = [
+      {
+        assertion = cfg.port != cfg.backendPort;
+        message = "Roomcast LAN and backend ports must differ";
+      }
       {
         assertion =
           builtins.match "[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+" cfg.rokuAddress != null
@@ -112,7 +144,7 @@ in
       requires = [ "roomcast.service" ];
       after = [ "roomcast.service" ];
       serviceConfig = {
-        ExecStart = "${pkgs.systemd}/lib/systemd/systemd-socket-proxyd 127.0.0.1:18796";
+        ExecStart = "${pkgs.systemd}/lib/systemd/systemd-socket-proxyd 127.0.0.1:${toString cfg.backendPort}";
         DynamicUser = true;
         NoNewPrivileges = true;
         ProtectSystem = "strict";

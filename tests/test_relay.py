@@ -1,27 +1,50 @@
 import asyncio
 import unittest
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 from roomcast.config import Config
-from roomcast.fetch import validate_url, PublicResolver
+from roomcast.fetch import PublicResolver, validate_url
 from roomcast.relay import Session
-
 
 HOST = "media.example.com"
 BASE = "https://media.example.com/"
 
 
 def config(**kw):
-    return Config(roku_ip="10.0.0.2", roku_serial="test", public_base="http://10.0.0.1:18796",
-                  allowed_hosts=[HOST], **kw)
+    return Config(
+        roku_ip="10.0.0.2",
+        roku_serial="test",
+        public_base="http://10.0.0.1:18796",
+        allowed_hosts=[HOST],
+        **kw,
+    )
 
 
 class SecurityTests(unittest.IsolatedAsyncioTestCase):
+    def test_invalid_deployment_endpoints_are_rejected(self):
+        for origin in (
+            "http://127.0.0.1:18795",
+            "http://0.0.0.0",
+            "http://10.0.0.1:0",
+            "http://10.0.0.1?x=1",
+            "http://10.0.0.1/#fragment",
+            "http://[fd00::1]",
+        ):
+            with self.subTest(origin=origin), self.assertRaises(ValueError):
+                replace(config(), public_base=origin)
+
     def test_url_boundary(self):
         validate_url(BASE + "a.m3u8", [HOST])
-        for url in ["http://media.example.com/a", "https://127.0.0.1/a", "https://media.example.com.evil/a",
-                    "https://user:pass@media.example.com/a", "https://media.example.com:8443/a",
-                    "file:///etc/passwd", "https://media.example.com/a#x"]:
+        for url in [
+            "http://media.example.com/a",
+            "https://127.0.0.1/a",
+            "https://media.example.com.evil/a",
+            "https://user:pass@media.example.com/a",
+            "https://media.example.com:8443/a",
+            "file:///etc/passwd",
+            "https://media.example.com/a#x",
+        ]:
             with self.subTest(url=url), self.assertRaises(ValueError):
                 validate_url(url, [HOST])
 
@@ -46,7 +69,7 @@ class PlaylistTests(unittest.IsolatedAsyncioTestCase):
         await self.session.close()
 
     def test_master_selects_height_and_rewrites_audio(self):
-        source = b'''#EXTM3U
+        source = b"""#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",URI="audio.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160
 4k.m3u8
@@ -54,17 +77,19 @@ class PlaylistTests(unittest.IsolatedAsyncioTestCase):
 1080.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720
 720.m3u8
-'''
+"""
         rewritten, segments = self.session.rewrite(source, BASE + "master.m3u8")
         self.assertNotIn(b"2160", rewritten)
         self.assertNotIn(b"1280", rewritten)
         self.assertIn(b"1920", rewritten)
         self.assertNotIn(BASE.encode(), rewritten)
         self.assertEqual(segments, [])
-        self.assertIn(BASE + "audio.m3u8", [r.url for r in self.session.resources.values()])
+        self.assertIn(
+            BASE + "audio.m3u8", [r.url for r in self.session.resources.values()]
+        )
 
     def test_fragmented_segments_remember_init_and_normalize_urls(self):
-        source = b'''#EXTM3U
+        source = b"""#EXTM3U
 #EXT-X-VERSION:7
 #EXT-X-TARGETDURATION:4
 #EXT-X-MEDIA-SEQUENCE:0
@@ -74,16 +99,22 @@ part.jpg
 #EXTINF:4,
 part2.png
 #EXT-X-ENDLIST
-'''
+"""
         rewritten, segments = self.session.rewrite(source, BASE + "720p/playlist.jpg")
         self.assertNotIn(b"EXT-X-MAP", rewritten)
         self.assertEqual(len(segments), 2)
-        self.assertEqual(self.session.resources[segments[0]].init, BASE + "720p/init.mp4")
+        self.assertEqual(
+            self.session.resources[segments[0]].init, BASE + "720p/init.mp4"
+        )
         self.assertNotIn(b".jpg", rewritten)
 
     def test_nested_origin_escape_and_encryption_rejected(self):
-        for line in ["https://evil.example/video", "http://127.0.0.1:8060/query/apps",
-                     '#EXT-X-KEY:METHOD=AES-128,URI="key"', '#EXT-X-BYTERANGE:123']:
+        for line in [
+            "https://evil.example/video",
+            "http://127.0.0.1:8060/query/apps",
+            '#EXT-X-KEY:METHOD=AES-128,URI="key"',
+            "#EXT-X-BYTERANGE:123",
+        ]:
             with self.subTest(line=line), self.assertRaises(ValueError):
                 self.session.rewrite(("#EXTM3U\n" + line + "\n").encode(), BASE)
 
@@ -93,8 +124,9 @@ part2.png
 
     async def test_concurrent_read_is_fetched_once(self):
         async def fetch(*args):
-            await asyncio.sleep(.01)
+            await asyncio.sleep(0.01)
             return b"data", BASE + "a.ts"
+
         self.fetch.get.side_effect = fetch
         key = self.session.register(BASE + "a.ts")
         results = await asyncio.gather(*[self.session.get(key) for _ in range(5)])
@@ -102,7 +134,10 @@ part2.png
         self.fetch.get.assert_awaited_once()
 
     async def test_failed_fetch_can_be_retried(self):
-        self.fetch.get.side_effect = [ValueError("upstream HTTP 503"), (b"data", BASE + "a.ts")]
+        self.fetch.get.side_effect = [
+            ValueError("upstream HTTP 503"),
+            (b"data", BASE + "a.ts"),
+        ]
         key = self.session.register(BASE + "a.ts")
         with self.assertRaises(ValueError):
             await self.session.get(key)

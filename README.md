@@ -5,11 +5,12 @@ isolated browser, serves it over the LAN, and opens Media Assistant on the TV.
 It copies compressed video/audio rather than recording the desktop or encoding
 new video. The Roku app need not already be open.
 
-The first supported resolver is Cinejoy. The first verified source is Nebula:
-H.264/AAC in fragmented MP4, repackaged into MPEG-TS HLS on demand. Other sources
-are attempted within an explicit host allowlist. This is not a universal website
-player: provider changes, unsupported codecs, encrypted streams and expired URLs
-can fail. No DRM handling or full video transcoding is implemented.
+The supported site adapter is Cinejoy. Every play request discovers its current
+server menu and resolves fresh stream URLs. Failed candidates advance to the next
+server; no provider name or CDN hostname is pinned. Compatible H.264/AAC fragmented
+MP4 is repackaged into MPEG-TS HLS on demand. This is not a universal website
+player: site layout changes, unsupported codecs, encrypted streams and expired
+URLs can fail. No DRM handling or full video transcoding is implemented.
 
 ## Use
 
@@ -53,11 +54,14 @@ services.roomcast = {
 };
 ```
 
-The backend binds loopback port 18796. A systemd socket proxy listens on the chosen
-LAN address at port 18795; the firewall accepts that port only from the configured
+The backend binds loopback port 18796 (`backendPort`). A systemd socket proxy listens on the chosen
+LAN address at port 18795 (`port`); the firewall accepts that port only from the configured
 Roku address. It serves token-scoped media, not control routes. The agent controls
 the service through `/run/roomcast/control.sock` (group `roomcast`, mode 0660).
-Add only the intended client service/account to that group.
+Add only the intended client service/account to that group. Use
+`config.services.roomcast.package` for client binaries so a package override
+applies to both the service and its clients. Address options require DHCP
+reservations; automatic discovery and lease-change recovery are not implemented.
 
 The service runs as its own user with no access to home directories, a private
 temporary directory, a 2 GiB memory ceiling, and bounded process/CPU use. Chromium
@@ -67,11 +71,23 @@ profile, saved login, KB access, SSH key or agent memory in the service.
 ## Streaming behavior
 
 Master playlists select at most the configured resolution (1080p by default).
-The relay validates every media origin and redirect, and rejects non-public DNS
-answers before connecting. It rewrites nested playlists to opaque, session-scoped
+The relay accepts only HTTPS media URLs and rejects non-public DNS answers before
+connecting, including on redirects. `allowedMediaHosts` can optionally restrict
+these further to an exact hostname list; its default `null` permits the current
+public CDNs discovered by the site adapter. No caller can submit arbitrary URLs.
+`siteUrl` changes the origin for a compatible Cinejoy site after a domain migration;
+it does not make the adapter understand another website's layout. It rewrites nested playlists to opaque, session-scoped
 URLs and handles required provider request headers server-side. HLS initialization
 segments and media fragments are joined and passed to FFmpeg with `-c copy`.
 Original timestamps are preserved. No frame is decoded or encoded.
+
+Source resolution is lazy: the browser yields a server's current candidates,
+playback prepares and verifies them, and only failures advance to another server.
+At most eight menu entries and three candidate URLs per server are tried. Browser
+contexts close on success, failure or cancellation; no resolved URL is persisted
+across play requests. Site changes still require adapter maintenance. Expiry during
+an already-playing session currently requires a new play request; seamless URL
+renewal and resume are not implemented.
 
 There is one active playback session. Responses share an LRU cache capped at
 128 MiB; four upstream jobs and two remux processes may run at once. Each media
@@ -104,6 +120,8 @@ claim a fully deployed multiplayer iMessage security boundary.
 
 ```sh
 uv sync --frozen
+uv run ruff check .
+uv run ruff format --check .
 uv run python -m unittest discover -s tests -v
 nix build
 ```

@@ -30,11 +30,16 @@ class Session:
         self.cache_size = 0
         self.pending = {}
         self.work = asyncio.Semaphore(4)
-        self.encoders = asyncio.Semaphore(2)
+        self.remux_slots = asyncio.Semaphore(2)
         self.tasks = set()
         self.closed = False
-        self.metrics = {"upstream_bytes": 0, "cache_hits": 0, "remux_seconds": 0.0,
-                        "segments_remuxed": 0, "fetch_seconds": 0.0}
+        self.metrics = {
+            "upstream_bytes": 0,
+            "cache_hits": 0,
+            "remux_seconds": 0.0,
+            "segments_remuxed": 0,
+            "fetch_seconds": 0.0,
+        }
         self.root = self.register(source)
 
     def register(self, url, init=None):
@@ -76,9 +81,14 @@ class Session:
         lines = body.decode("utf-8-sig").splitlines()
         if not lines or lines[0] != "#EXTM3U":
             raise ValueError("invalid HLS playlist")
-        if any(line.startswith(("#EXT-X-KEY:", "#EXT-X-SESSION-KEY:", "#EXT-X-BYTERANGE:")) for line in lines):
+        if any(
+            line.startswith(("#EXT-X-KEY:", "#EXT-X-SESSION-KEY:", "#EXT-X-BYTERANGE:"))
+            for line in lines
+        ):
             raise ValueError("encrypted or byte-range HLS is not supported")
-        if "#EXT-X-ENDLIST" not in lines and any(line.startswith("#EXTINF:") for line in lines):
+        if "#EXT-X-ENDLIST" not in lines and any(
+            line.startswith("#EXTINF:") for line in lines
+        ):
             raise ValueError("only complete on-demand playlists are supported")
         variants = []
         for index, line in enumerate(lines):
@@ -112,25 +122,55 @@ class Session:
                 if not variants:
                     segments.append(key)
             elif 'URI="' in line:
+
                 def replace(match):
-                    return 'URI="' + self.link(self.register(urljoin(base, match[1]))) + '"'
+                    return (
+                        'URI="'
+                        + self.link(self.register(urljoin(base, match[1])))
+                        + '"'
+                    )
+
                 output.append(re.sub(r'URI="([^"]+)"', replace, line))
             else:
                 output.append(line)
         return ("\n".join(output) + "\n").encode(), segments
 
     async def remux(self, data, init):
-        async with self.encoders:
+        async with self.remux_slots:
             start = time.monotonic()
             with tempfile.TemporaryDirectory(prefix="roomcast-") as directory:
-                src, dest = Path(directory) / "input.mp4", Path(directory) / "segment.ts"
+                src, dest = (
+                    Path(directory) / "input.mp4",
+                    Path(directory) / "segment.ts",
+                )
                 src.write_bytes(init + data)
                 process = await asyncio.create_subprocess_exec(
-                    self.config.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
-                    "-protocol_whitelist", "file", "-copyts", "-i", str(src),
-                    "-map", "0:v?", "-map", "0:a?", "-c", "copy",
-                    "-mpegts_copyts", "1", "-muxdelay", "0", "-muxpreload", "0",
-                    "-f", "mpegts", str(dest), stdout=asyncio.subprocess.DEVNULL,
+                    self.config.ffmpeg,
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-protocol_whitelist",
+                    "file",
+                    "-copyts",
+                    "-i",
+                    str(src),
+                    "-map",
+                    "0:v?",
+                    "-map",
+                    "0:a?",
+                    "-c",
+                    "copy",
+                    "-mpegts_copyts",
+                    "1",
+                    "-muxdelay",
+                    "0",
+                    "-muxpreload",
+                    "0",
+                    "-f",
+                    "mpegts",
+                    str(dest),
+                    stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 try:
@@ -140,7 +180,11 @@ class Session:
                         process.kill()
                     await process.wait()
                     raise
-                if process.returncode or not dest.exists() or dest.stat().st_size > 40 * 1024 * 1024:
+                if (
+                    process.returncode
+                    or not dest.exists()
+                    or dest.stat().st_size > 40 * 1024 * 1024
+                ):
                     raise ValueError("segment repackaging failed")
                 result = dest.read_bytes()
             self.metrics["segments_remuxed"] += 1
