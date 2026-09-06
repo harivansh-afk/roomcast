@@ -73,11 +73,15 @@ class PlaylistTests(unittest.IsolatedAsyncioTestCase):
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",URI="audio.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160
 4k.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="a"
 1080.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720
 720.m3u8
 """
+        # Only the asynchronous preflight may choose a master rendition.
+        with self.assertRaises(ValueError):
+            self.session.rewrite(source, BASE + "master.m3u8")
+        self.session.selections[BASE + "master.m3u8"] = 4
         rewritten, segments = self.session.rewrite(source, BASE + "master.m3u8")
         self.assertNotIn(b"2160", rewritten)
         self.assertNotIn(b"1280", rewritten)

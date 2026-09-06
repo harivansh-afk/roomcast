@@ -52,19 +52,7 @@ class Service:
         self.job_state = {"state": "idle"}
 
     async def prepare(self, session):
-        data, content_type = await session.get(session.root)
-        if content_type != "application/vnd.apple.mpegurl":
-            raise ValueError("source did not provide an HLS playlist")
-        for line in data.decode().splitlines():
-            if line and not line.startswith("#"):
-                child = line.rsplit("/", 1)[-1]
-                child_data, child_type = await session.get(child)
-                if child_type == "application/vnd.apple.mpegurl":
-                    for segment in child_data.decode().splitlines():
-                        if segment and not segment.startswith("#"):
-                            await session.get(segment.rsplit("/", 1)[-1])
-                            break
-                break
+        return await session.prepare()
 
     async def play(self, body):
         started = time.monotonic()
@@ -112,7 +100,10 @@ class Service:
                             resolved["title"],
                         )
                         try:
-                            await self.prepare(candidate)
+                            try:
+                                await self.prepare(candidate)
+                            finally:
+                                self.job_state["preflight"] = candidate.preflight
                             previous, self.session = self.session, candidate
                             if previous:
                                 await previous.close()
@@ -216,6 +207,7 @@ class Service:
             await self.network.ensure()
         result = {"job": self.job_state, "roku": await self.roku.status()}
         if self.session:
+            result["preflight"] = self.session.preflight
             result["relay"] = {
                 **self.session.metrics,
                 "cache_bytes": self.session.cache_size,

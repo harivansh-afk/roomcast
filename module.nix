@@ -18,6 +18,7 @@ let
       ip_command = "${pkgs.iproute2}/bin/ip";
       chromium = "${pkgs.chromium}/bin/chromium";
       ffmpeg = "${pkgs.ffmpeg-headless}/bin/ffmpeg";
+      ffprobe = "${pkgs.ffmpeg-headless}/bin/ffprobe";
       max_height = cfg.maxHeight;
       allowed_hosts = cfg.allowedMediaHosts;
       site_url = cfg.siteUrl;

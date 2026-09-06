@@ -25,6 +25,7 @@ class Config:
     media_port: int = 18796
     chromium: str = "chromium"
     ffmpeg: str = "ffmpeg"
+    ffprobe: str = "ffprobe"
     max_height: int = 1080
     cache_bytes: int = 128 * 1024 * 1024
     session_seconds: int = 21600

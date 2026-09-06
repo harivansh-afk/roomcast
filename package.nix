@@ -2,6 +2,7 @@
   lib,
   python3Packages,
   ruff,
+  ffmpeg-headless,
 }:
 let
   project = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project;
@@ -30,7 +31,10 @@ python3Packages.buildPythonApplication {
     "roomcast.server"
     "roomcast.cli"
   ];
-  nativeCheckInputs = [ ruff ];
+  nativeCheckInputs = [
+    ruff
+    ffmpeg-headless
+  ];
   checkPhase = ''
     runHook preCheck
     ruff check roomcast tests
