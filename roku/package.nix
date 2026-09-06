@@ -7,16 +7,20 @@
 }:
 stdenvNoCC.mkDerivation {
   pname = "roomcast-roku-player";
-  version = "1.3.2";
+  version = "1.3.3";
   src = fetchFromGitHub {
     owner = "MedievalApple";
     repo = "Media-Assistant";
     rev = "1335dd41aad175ad7494f01f7e2c21a582d06179";
     hash = "sha256-gDxVvX6EoozV7GncM55kste3Q2XLtCO2WmbE95obPXE=";
   };
-  patches = [ ./timestamp-seeking.patch ];
+  patches = [
+    ./timestamp-seeking.patch
+    ./subtitle-controls.patch
+  ];
   postPatch = ''
     cp ${../LICENSE} ROOMCAST-LICENSE
+    cp ${./components}/* components/
   '';
   nativeBuildInputs = [ zip ];
   nativeCheckInputs = [ unzip ];

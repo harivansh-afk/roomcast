@@ -114,8 +114,10 @@ video.m3u8
     async def asyncSetUp(self):
         self.data = dict(self.objects)
 
-        async def fetch(url, headers):
-            return self.data[url.rsplit("/", 1)[-1]], url
+        async def fetch(url, headers, limit=32 * 1024 * 1024):
+            data = self.data[url.rsplit("/", 1)[-1]]
+            self.assertLessEqual(len(data), limit)
+            return data, url
 
         self.fetcher = AsyncMock()
         self.fetcher.get.side_effect = fetch
@@ -164,6 +166,40 @@ video.m3u8
         self.assertEqual(mime, "video/mp2t")
         decoded = await decode_media(data, "ffmpeg", ("video", "audio"))
         self.assertEqual(set(decoded), {"video", "audio"})
+
+    async def test_subtitles_survive_preflight_and_random_access_keeps_av_decodable(
+        self,
+    ):
+        self.data["master.m3u8"] = self.data["master.m3u8"].replace(
+            b"#EXT-X-STREAM-INF:",
+            b'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",URI="subs.m3u8"\n#EXT-X-STREAM-INF:SUBTITLES="subs",',
+        )
+        self.data["subs.m3u8"] = (
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsubs.vtt\n#EXT-X-ENDLIST\n"
+        )
+        self.data["subs.vtt"] = (
+            b"WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0\n\n00:00:03.000 --> 00:00:04.000\nHello.\n"
+        )
+        await self.session.prepare()
+        self.assertEqual(self.session.subtitle_tracks[0]["language"], "en")
+        key = self.session.register(BASE + "subs.m3u8", role="subtitle")
+        playlist, _ = await self.session.get(key)
+        key = next(
+            line.rsplit(b"/", 1)[-1].decode()
+            for line in playlist.splitlines()
+            if line and not line.startswith(b"#")
+        )
+        self.assertEqual((await self.session.get(key))[0], self.data["subs.vtt"])
+        for name in ("video", "audio"):
+            _, keys = self.session.rewrite(
+                self.data[name + ".m3u8"], BASE + name + ".m3u8"
+            )
+            for key in (keys[-2], keys[0]):
+                data, _ = await self.session.get(key)
+                decoded = await decode_media(
+                    self.data[name + "-init.mp4"] + data, "ffmpeg", (name,)
+                )
+                self.assertGreater(decoded[name]["frames"], 1)
 
     async def test_reject_missing_audio_and_missing_video(self):
         for name in ("video", "audio"):

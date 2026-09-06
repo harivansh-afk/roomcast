@@ -88,6 +88,9 @@ class Roku:
             "container": media_format.get("container")
             if media_format is not None
             else None,
+            "caption_format": media_format.get("captions")
+            if media_format is not None
+            else None,
         }
 
     @staticmethod
@@ -97,7 +100,7 @@ class Roku:
             for key in ("audio_format", "video_format")
         )
 
-    async def launch(self, url, title, start_seconds=0):
+    async def launch(self, url, title, start_seconds=0, subtitles=None):
         await self.verify()
         await self.request(
             f"/launch/{self.app_id}",
@@ -107,8 +110,13 @@ class Roku:
                 "videoFormat": "hls",
                 "videoName": title,
                 **({"startSeconds": start_seconds} if start_seconds else {}),
+                **(subtitles or {}),
             },
         )
+
+    async def subtitles(self, params):
+        await self.verify()
+        await self.request("/input", {"a": "subtitles", **params})
 
     async def launch_youtube(self, video_id):
         await self.verify()

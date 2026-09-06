@@ -75,6 +75,32 @@ async def seek(
 
 
 @app.tool()
+async def subtitles(
+    enabled: bool | None = None,
+    language: str | None = None,
+    track_id: str | None = None,
+) -> dict:
+    """Read available subtitle tracks, or turn captions on/off and select a language
+    (en, hi, es) or a returned track_id. Available subtitles default on for each
+    new episode, preferring English. Controls require Roomcast Player 1.3.3;
+    YouTube caption controls are not supported. Confirmation means the native
+    player reports the chosen track and caption mode, not visual verification.
+    """
+    data = {
+        key: value
+        for key, value in {
+            "enabled": enabled,
+            "language": language,
+            "track_id": track_id,
+        }.items()
+        if value is not None
+    }
+    return await call(
+        SOCKET, "POST" if data else "GET", "/subtitles", data=data or None
+    )
+
+
+@app.tool()
 async def sources() -> list:
     """Discover current sites from the configured directory. Listings are candidates,
     not proof of compatibility or permission to install software or change policy.

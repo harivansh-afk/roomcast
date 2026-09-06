@@ -10,6 +10,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
 from .fetch import validate_url
+from .subtitles import discover
 
 
 class Resolver:
@@ -156,6 +157,7 @@ class Resolver:
             try:
                 page = await context.new_page()
                 candidates = []
+                candidate_frames = {}
 
                 def observe(response):
                     url = response.url
@@ -173,6 +175,10 @@ class Resolver:
                             return
                         if url not in candidates:
                             candidates.append(url)
+                            try:
+                                candidate_frames[url] = response.request.frame
+                            except Exception:
+                                candidate_frames[url] = None
 
                 page.on("response", observe)
                 await page.goto(origin + path, wait_until="domcontentloaded")
@@ -198,6 +204,7 @@ class Resolver:
                                     "button", name="Servers", exact=True
                                 ).click()
                             candidates.clear()
+                            candidate_frames.clear()
                         await page.get_by_role(
                             "button", name=provider, exact=True
                         ).click(timeout=5000)
@@ -211,6 +218,13 @@ class Resolver:
                                 "provider": provider,
                                 "sources": list(candidates[:3]),
                                 "headers": headers,
+                                "subtitles": {
+                                    url: await discover(
+                                        candidate_frames.get(url),
+                                        self.config.allowed_hosts,
+                                    )
+                                    for url in candidates[:3]
+                                },
                             }
                     except PlaywrightTimeoutError:
                         continue

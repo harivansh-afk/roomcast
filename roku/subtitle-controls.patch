@@ -1,0 +1,200 @@
+diff --git a/components/inputTask.brs b/components/inputTask.brs
+index 0c5c51f..f7b9578 100644
+--- a/components/inputTask.brs
++++ b/components/inputTask.brs
+@@ -35,6 +35,13 @@ function ListenInput()
+                     videoFormat: check("", inputData.videoFormat)
+                     videoSubs: check("", inputData.videoSubs)
+                     startSeconds: strToInt(inputData.startSeconds)
++                    subtitlesEnabled: strToBool(inputData.subtitlesEnabled)
++                    subtitleTracks: check("", inputData.subtitleTracks)
++                    subtitleRequest: check("", inputData.subtitleRequest)
++                    subtitleId: check("", inputData.subtitleId)
++                    subtitleName: check("", inputData.subtitleName)
++                    subtitleUrl: check("", inputData.subtitleUrl)
++                    subtitleReportUrl: check("", inputData.subtitleReportUrl)
+                     positionSeconds: strToInt(inputData.positionSeconds)
+                     stayPaused: strToBool(inputData.stayPaused)
+                     timeOffset: strToInt(inputData.timeOffset)
+diff --git a/components/mediaplayer.brs b/components/mediaplayer.brs
+index 8590930..6d78984 100644
+--- a/components/mediaplayer.brs
++++ b/components/mediaplayer.brs
+@@ -29,6 +29,9 @@ sub init()
+ 
+     m.video.observeField("state", "controlvideoplay")
+     m.video.observeField("position", "trackvideoprogress")
++    m.video.observeField("availableSubtitleTracks", "applySubtitles")
++    m.video.observeField("currentSubtitleTrack", "reportSubtitles")
++    m.video.observeField("globalCaptionMode", "reportSubtitles")
+ 
+     m.top.SignalBeacon("AppLaunchComplete")
+ 
+@@ -107,6 +110,8 @@ sub handleInputEvent(msg)
+                         handleDeepLink(deeplink)
+                     end if
+                 end if
++            elseif (deeplink.a = "subtitles")
++                configureSubtitles(deeplink)
+             elseif (deeplink.a = "seek")
+                 seekVideo(deeplink)
+             elseif (deeplink.a = "s")
+@@ -122,6 +127,83 @@ sub handleInputEvent(msg)
+ end sub
+ 
+ ' Roomcast timestamp protocol. Does not restart or replace the current content.
++sub configureSubtitles(deeplink)
++    m.subtitleConfig = deeplink
++    if m.subtitleConfig.subtitlesEnabled = invalid
++        m.subtitleConfig.subtitlesEnabled = true
++    end if
++    m.lastSubtitleReport = ""
++    m.subtitlePending = true
++    m.subtitleReportSequence = 0
++    if m.subtitleReporter <> invalid
++        m.subtitleReporter.control = "STOP"
++    end if
++    applySubtitles()
++end sub
++
++sub applySubtitles()
++    if m.subtitleConfig = invalid or m.applyingSubtitles = true then return
++    if m.subtitlePending <> true
++        reportSubtitles()
++        return
++    end if
++    m.applyingSubtitles = true
++    if m.subtitleConfig.subtitlesEnabled
++        m.video.globalCaptionMode = "On"
++        for each item in m.video.availableSubtitleTracks
++            if (m.subtitleConfig.subtitleUrl <> "" and item.TrackName = m.subtitleConfig.subtitleUrl) or (m.subtitleConfig.subtitleName <> "" and item.Description = m.subtitleConfig.subtitleName)
++                if m.video.subtitleTrack <> item.TrackName
++                    m.video.subtitleTrack = item.TrackName
++                end if
++                exit for
++            end if
++        end for
++    else
++        m.video.globalCaptionMode = "Off"
++    end if
++    m.applyingSubtitles = false
++    reportSubtitles()
++end sub
++
++sub reportSubtitles()
++    if m.subtitleConfig = invalid or m.applyingSubtitles = true then return
++    if m.subtitleConfig.subtitleReportUrl = "" or m.subtitleConfig.subtitleRequest = "" then return
++    available = false
++    selected = false
++    for each item in m.video.availableSubtitleTracks
++        if (m.subtitleConfig.subtitleUrl <> "" and item.TrackName = m.subtitleConfig.subtitleUrl) or (m.subtitleConfig.subtitleName <> "" and item.Description = m.subtitleConfig.subtitleName)
++            available = true
++            selected = (m.video.currentSubtitleTrack = item.TrackName)
++            exit for
++        end if
++    end for
++    if m.subtitleConfig.subtitlesEnabled
++        applied = selected and m.video.globalCaptionMode = "On"
++        ' Wait for the player to expose and select a track during startup.
++        if not applied and m.lastSubtitleReport = "" then return
++    else
++        applied = (m.video.globalCaptionMode = "Off")
++    end if
++    if applied then m.subtitlePending = false
++    report = {
++        request: m.subtitleConfig.subtitleRequest
++        enabled: m.subtitleConfig.subtitlesEnabled
++        track: m.subtitleConfig.subtitleId
++        available: available
++        applied: applied
++        caption_mode: m.video.globalCaptionMode
++    }
++    signature = FormatJson(report)
++    if signature = m.lastSubtitleReport then return
++    m.lastSubtitleReport = signature
++    m.subtitleReportSequence++
++    report.sequence = m.subtitleReportSequence
++    m.subtitleReporter = CreateObject("roSGNode", "subtitleReport")
++    m.subtitleReporter.url = m.subtitleConfig.subtitleReportUrl
++    m.subtitleReporter.report = report
++    m.subtitleReporter.control = "RUN"
++end sub
++
+ sub seekVideo(deeplink)
+     if m.parsedDeeplink = invalid then return
+     if m.parsedDeeplink.t <> "v" then return
+@@ -159,6 +241,7 @@ sub updateMetadata(deeplink)
+ end sub
+ 
+ sub playaudio()
++    m.subtitleConfig = invalid
+     audiocontent = createObject("RoSGNode", "ContentNode")
+     
+     audiocontent.url = m.parsedDeeplink.u
+@@ -212,6 +295,7 @@ sub SetAlbumName(albumName As String)
+ end sub
+ 
+ sub playvideo()
++    m.subtitleConfig = invalid
+     videocontent = createObject("RoSGNode", "ContentNode")
+ 
+     videocontent.title = m.parsedDeeplink.videoName
+@@ -223,15 +307,22 @@ sub playvideo()
+         end if
+     end if
+ 
+-    videocontent.subtitletracks = [{
+-        Language: "en-US",
+-        Description: "Subtitles",
+-        TrackName: m.parsedDeeplink.videoSubs
+-    }]
++    tracks = invalid
++    if m.parsedDeeplink.subtitleTracks <> ""
++        tracks = ParseJson(m.parsedDeeplink.subtitleTracks)
++    end if
++    if type(tracks) = "roArray"
++        videocontent.subtitleTracks = tracks
++    elseif m.parsedDeeplink.videoSubs <> ""
++        videocontent.subtitleTracks = [{
++            Language: "eng", Description: "Subtitles", TrackName: m.parsedDeeplink.videoSubs
++        }]
++    end if
+ 
+     m.video.seekMode = "accurate"
+     m.video.autoplayAfterSeek = true
+     m.video.content = videocontent
++    configureSubtitles(m.parsedDeeplink)
+ 
+     m.video.enableTrickPlay = true
+     m.video.trickPlayBar.filledBarBlendColor = "#662d91"
+diff --git a/manifest b/manifest
+index 324f4f2..38b4c34 100644
+--- a/manifest
++++ b/manifest
+@@ -1,7 +1,7 @@
+ title=Roomcast Player
+ major_version=1
+ minor_version=3
+-build_version=2
++build_version=3
+ 
+ ##   Channel Assets
+ ###  Main Menu Icons / Channel Poster Artwork 
+diff --git a/source/main.brs b/source/main.brs
+index 4f21302..6d1f1dd 100644
+--- a/source/main.brs
++++ b/source/main.brs
+@@ -43,6 +43,13 @@ Function getDeepLinks(args) as Object
+             videoFormat: check("", args.videoFormat)
+             videoSubs: check("", args.videoSubs)
+             startSeconds: strToInt(args.startSeconds)
++            subtitlesEnabled: strToBool(args.subtitlesEnabled)
++            subtitleTracks: check("", args.subtitleTracks)
++            subtitleRequest: check("", args.subtitleRequest)
++            subtitleId: check("", args.subtitleId)
++            subtitleName: check("", args.subtitleName)
++            subtitleUrl: check("", args.subtitleUrl)
++            subtitleReportUrl: check("", args.subtitleReportUrl)
+             timeOffset: strToInt(args.timeOffset)
+             duration: strToInt(args.duration)
+             enqueue: strToBool(args.enqueue)

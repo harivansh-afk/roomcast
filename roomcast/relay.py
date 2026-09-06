@@ -45,6 +45,11 @@ class Session:
         }
         self.selections = {}
         self.audio_selections = {}
+        self.subtitle_tracks = []
+        self.subtitle_error = None
+        self.subtitle_request = None
+        self.subtitle_report = None
+        self.subtitle_event = asyncio.Event()
         self.roles = {}
         self.evidence = {}
         self.delivered = set()
@@ -71,6 +76,8 @@ class Session:
         key = hashlib.sha256(repr((url, init, role, duration)).encode()).hexdigest()[
             :24
         ]
+        if role == "subtitle-file":
+            key += ".srt"
         if len(self.resources) >= 10000 and key not in self.resources:
             raise ValueError("playlist resource limit exceeded")
         self.resources[key] = Resource(url, init, role, duration)
@@ -96,7 +103,7 @@ class Session:
             raise ValueError("pinned playlist budget exceeded")
         self.playlists[url] = (body, final)
 
-    async def raw(self, url):
+    async def raw(self, url, limit=None):
         if url in self.playlists:
             return self.playlists[url]
         key = ("raw", url)
@@ -105,7 +112,9 @@ class Session:
             self.metrics["cache_hits"] += 1
             return self.cache[key]
         start = time.monotonic()
-        data, final = await self.fetcher.get(url, self.headers)
+        data, final = await self.fetcher.get(
+            url, self.headers, **({"limit": limit} if limit else {})
+        )
         self.metrics["fetch_seconds"] += time.monotonic() - start
         self.metrics["upstream_bytes"] += len(data)
         self.put(key, (data, final))
@@ -138,10 +147,15 @@ class Session:
                 raise ValueError("master requires compatibility preflight")
         skipped = {i for _, i in variants if i != chosen}
         audio_group = None
+        subtitle_group = None
         if chosen is not None:
             from .preflight import attributes, value
 
             audio_group = value(attributes(lines[chosen]), "AUDIO")
+            subtitle_group = value(attributes(lines[chosen]), "SUBTITLES")
+            self.subtitle_tracks = [
+                t for t in self.subtitle_tracks if t["kind"] != "hls"
+            ]
         init, duration = None, None
         role = self.roles.get(base)
         output, segments = [], []
@@ -151,6 +165,40 @@ class Session:
             if variants and line.startswith("#EXT-X-MEDIA:"):
                 attrs = attributes(line)
                 if (
+                    value(attrs, "TYPE") == "SUBTITLES"
+                    and value(attrs, "GROUP-ID") == subtitle_group
+                ):
+                    from .subtitles import track
+
+                    try:
+                        item = track(
+                            urljoin(base, value(attrs, "URI")),
+                            value(attrs, "NAME"),
+                            value(attrs, "LANGUAGE"),
+                            "hls",
+                            self.config.allowed_hosts,
+                            value(attrs, "DEFAULT") == "YES",
+                            value(attrs, "FORCED") == "YES",
+                        )
+                        if (
+                            not value(attrs, "URI")
+                            or sum(t["kind"] == "hls" for t in self.subtitle_tracks)
+                            >= 32
+                        ):
+                            continue
+                        key = self.register(item["url"], role="subtitle")
+                    except ValueError:
+                        self.subtitle_error = "A subtitle track has an unsupported URL"
+                        continue
+                    self.subtitle_tracks.append(item)
+                    self.roles[item["url"]] = "subtitle"
+                    attrs["URI"] = '"' + self.link(key) + '"'
+                    attrs["NAME"] = '"' + item["name"] + '"'
+                    output.append(
+                        "#EXT-X-MEDIA:" + ",".join(f"{k}={v}" for k, v in attrs.items())
+                    )
+                    continue
+                elif (
                     value(attrs, "TYPE") != "AUDIO"
                     or value(attrs, "GROUP-ID") != audio_group
                     or index != self.audio_selections.get(base)
@@ -159,6 +207,10 @@ class Session:
             if line.startswith("#EXT-X-I-FRAME-STREAM-INF:"):
                 continue
             if line.startswith("#EXT-X-MAP:"):
+                if role == "subtitle":
+                    raise ValueError(
+                        "only plain WebVTT subtitle segments are supported"
+                    )
                 match = re.search(r'URI="([^"]+)"', line)
                 if not match or "BYTERANGE=" in line:
                     raise ValueError("invalid initialization segment")
@@ -171,8 +223,11 @@ class Session:
                 continue
             if line.startswith("#EXTINF:"):
                 duration = float(line.split(":", 1)[1].split(",", 1)[0])
-                if not math.isfinite(duration) or not 0 < duration <= 30:
-                    raise ValueError("HLS segment duration must be within 30 seconds")
+                maximum = 21600 if role == "subtitle" else 30
+                if not math.isfinite(duration) or not 0 < duration <= maximum:
+                    raise ValueError(
+                        f"HLS segment duration must be within {maximum} seconds"
+                    )
             if line and not line.startswith("#"):
                 if not variants and duration is None:
                     raise ValueError("media segment has no duration")
@@ -193,10 +248,15 @@ class Session:
                 output.append(re.sub(r'URI="([^"]+)"', replace, line))
             else:
                 if line.startswith("#EXT-X-STREAM-INF:"):
-                    line = re.sub(
-                        r',?(?:SUBTITLES|CLOSED-CAPTIONS)=("[^"]*"|[^,]*)', "", line
-                    )
+                    line = re.sub(r',?CLOSED-CAPTIONS=("[^"]*"|[^,]*)', "", line)
                 output.append(line)
+        if variants and not any(t["kind"] == "hls" for t in self.subtitle_tracks):
+            output = [
+                re.sub(r',?SUBTITLES="[^"]*"', "", line)
+                if line.startswith("#EXT-X-STREAM-INF:")
+                else line
+                for line in output
+            ]
         return ("\n".join(output) + "\n").encode(), segments
 
     async def remux(self, data, init):
@@ -262,14 +322,25 @@ class Session:
     async def _load(self, key):
         async with self.work:
             resource = self.resources[key]
-            data, final = await self.raw(resource.url)
+            from .subtitles import MAX_SUBTITLE_BYTES, subtitle_text
+
+            is_subtitle = resource.role in ("subtitle", "subtitle-file")
+            data, final = await self.raw(
+                resource.url, MAX_SUBTITLE_BYTES if is_subtitle else None
+            )
             if data.startswith((b"#EXTM3U", b"\xef\xbb\xbf#EXTM3U")):
+                if resource.role == "subtitle-file":
+                    raise ValueError("expected a subtitle file, not a playlist")
+                if resource.role == "subtitle":
+                    self.roles[final] = "subtitle"
                 data, segments = self.rewrite(data, final)
                 result = data, "application/vnd.apple.mpegurl"
                 for upcoming in segments[:2]:
                     task = asyncio.create_task(self._prefetch(upcoming))
                     self.tasks.add(task)
                     task.add_done_callback(self.tasks.discard)
+            elif is_subtitle:
+                result = subtitle_text(data, segmented=resource.role == "subtitle")
             else:
                 init = b""
                 if resource.init:
