@@ -150,7 +150,7 @@ index 8590930..6d78984 100644
 -    }]
 +    tracks = invalid
 +    if m.parsedDeeplink.subtitleTracks <> ""
-+        tracks = ParseJson(m.parsedDeeplink.subtitleTracks)
++        tracks = ParseJson(m.parsedDeeplink.subtitleTracks, "i")
 +    end if
 +    if type(tracks) = "roArray"
 +        videocontent.subtitleTracks = tracks
@@ -176,7 +176,7 @@ index 324f4f2..38b4c34 100644
  major_version=1
  minor_version=3
 -build_version=2
-+build_version=3
++build_version=4
  
  ##   Channel Assets
  ###  Main Menu Icons / Channel Poster Artwork 
