@@ -27,3 +27,27 @@ The tests cover hostile/redirected URL boundaries, private DNS answers, playlist
 rewriting, cache bounds, concurrent fetch deduplication, retries, invalidation,
 Roku identity, query encoding, asynchronous stop and HTTP ranges. They do not
 establish universal provider compatibility or uninterrupted full-episode playback.
+
+
+## Playback rewrite, 2026-09-06
+
+Family Guy S01E01 through Lisbon reproduced the missing-audio issue on the same
+TV: the deployed service reported `playing` while ECP reported `audio="none"`.
+
+With the rewritten relay, the source's actual 1920x1080 H.264 Main level 4.0 video
+and AAC-LC stereo audio were validated across eight segments in 3.51 seconds on
+Spark. This excludes browser lookup and TV startup. A first TV attempt caught
+false provider CODECS metadata: it advertised level 5.0 and Roku rejected the
+master before fetching media. Omitting that hint and publishing measured
+parameters allowed startup.
+
+The TV then reported AAC audio and H.264 video, no error, and progressed from
+4.163 to 65.804 seconds. Pause held at 24.957 seconds and resume advanced to
+35.526 seconds. Hari independently confirmed that picture and sound worked.
+Thirty-seven segments were validated during this run, including startup samples
+and subsequent TV requests. The test used a temporary Mac TCP forward to a
+worktree service on Spark; neither machine recorded the desktop or transcoded the
+video. Both temporary processes were stopped after the test.
+
+This establishes the tested episode and controls, not every title or full-episode
+playback. Permanent direct Spark delivery is a separate deployment check.

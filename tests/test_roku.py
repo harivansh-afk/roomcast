@@ -65,3 +65,86 @@ class RokuTests(unittest.IsolatedAsyncioTestCase):
         from roomcast.client import Command
 
         self.assertEqual(set(get_args(Command)), set(Roku.commands))
+
+    async def test_status_includes_real_device_audio_and_video_formats(self):
+        roku = Roku("10.0.0.2", "ok")
+        roku.verify = AsyncMock()
+        roku.request = AsyncMock(
+            side_effect=[
+                b'<active-app><app id="782875">Media Assistant</app></active-app>',
+                b'<player state="play" error="false"><plugin id="782875"/><format audio="none" video="mpeg4_10b" container="hls"/><position>1200 ms</position></player>',
+            ]
+        )
+        try:
+            state = await roku.status()
+            self.assertEqual(state["audio_format"], "none")
+            self.assertEqual(state["video_format"], "mpeg4_10b")
+            self.assertFalse(roku.has_av(state))
+        finally:
+            await roku.close()
+
+    async def test_progress_without_both_tracks_never_confirms(self):
+        import asyncio
+        from unittest.mock import patch
+
+        real_sleep = asyncio.sleep
+
+        async def tick(_):
+            await real_sleep(0.001)
+
+        for missing in ("audio_format", "video_format"):
+            roku = Roku("10.0.0.2", "ok")
+            position = 0
+
+            async def status():
+                nonlocal position
+                position += 1000
+                return {
+                    "app_id": roku.app_id,
+                    "player_app_id": roku.app_id,
+                    "state": "play",
+                    "error": False,
+                    "position_ms": position,
+                    "audio_format": "aac",
+                    "video_format": "mpeg4_10b",
+                    missing: "none",
+                }
+
+            roku.status = status
+            try:
+                with (
+                    patch("roomcast.roku.asyncio.sleep", side_effect=tick),
+                    self.assertRaisesRegex(ValueError, "audio and video"),
+                ):
+                    await roku.confirm(seconds=0.02)
+            finally:
+                await roku.close()
+
+    async def test_confirmation_requires_current_session_delivery_and_sustained_av(
+        self,
+    ):
+        from unittest.mock import patch
+
+        roku = Roku("10.0.0.2", "ok")
+        position = 0
+
+        async def status():
+            nonlocal position
+            position += 1000
+            return {
+                "app_id": roku.app_id,
+                "player_app_id": roku.app_id,
+                "state": "play",
+                "error": False,
+                "position_ms": position,
+                "audio_format": "aac",
+                "video_format": "mpeg4_10b",
+            }
+
+        roku.status = status
+        try:
+            with patch("roomcast.roku.asyncio.sleep", new=AsyncMock()):
+                result = await roku.confirm(delivered=lambda: position >= 5000)
+            self.assertEqual(result["position_ms"], 6000)
+        finally:
+            await roku.close()

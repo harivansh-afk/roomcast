@@ -61,6 +61,7 @@ class Roku:
         app = ET.fromstring(await self.request("/query/active-app")).find("app")
         player = ET.fromstring(await self.request("/query/media-player"))
         plugin = player.find("plugin")
+        media_format = player.find("format")
 
         def millis(name):
             try:
@@ -76,7 +77,23 @@ class Roku:
             "error": player.get("error") == "true",
             "position_ms": millis("position"),
             "duration_ms": millis("duration"),
+            "audio_format": media_format.get("audio")
+            if media_format is not None
+            else None,
+            "video_format": media_format.get("video")
+            if media_format is not None
+            else None,
+            "container": media_format.get("container")
+            if media_format is not None
+            else None,
         }
+
+    @staticmethod
+    def has_av(state):
+        return all(
+            state.get(key) not in (None, "", "none", "unknown")
+            for key in ("audio_format", "video_format")
+        )
 
     async def launch(self, url, title):
         await self.verify()
@@ -107,23 +124,37 @@ class Roku:
         await self.request("/keypress/" + self.commands[command], {})
         return await self.status()
 
-    async def confirm(self, seconds=30, app_id=None):
+    async def confirm(self, seconds=30, app_id=None, delivered=None):
         app_id = app_id or self.app_id
         previous = None
-        for _ in range(seconds // 2):
-            await asyncio.sleep(2)
-            state = await self.status()
-            if state["app_id"] == app_id and state["player_app_id"] == app_id:
-                if state["error"]:
-                    raise ValueError("Roku rejected the stream")
-                if (
-                    state["state"] == "play"
-                    and previous is not None
-                    and state["position_ms"] > previous
-                ):
-                    return state
-                previous = state["position_ms"]
-        raise ValueError("Roku did not confirm progressing playback within 30 seconds")
+        progressing = 0
+        try:
+            async with asyncio.timeout(seconds):
+                while True:
+                    await asyncio.sleep(2)
+                    state = await self.status()
+                    if state["app_id"] == app_id and state["player_app_id"] == app_id:
+                        if state["error"]:
+                            raise ValueError("Roku rejected the stream")
+                        if (
+                            state["state"] == "play"
+                            and self.has_av(state)
+                            and previous is not None
+                            and state["position_ms"] > previous
+                            and (delivered is None or delivered())
+                        ):
+                            progressing += 1
+                            if progressing >= 2:
+                                return state
+                        else:
+                            progressing = 0
+                        previous = state["position_ms"]
+                    else:
+                        previous, progressing = None, 0
+        except TimeoutError:
+            raise ValueError(
+                "Roku did not confirm progressing audio and video before startup timeout"
+            ) from None
 
     async def close(self):
         await self.client.close()

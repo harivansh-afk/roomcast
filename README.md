@@ -7,8 +7,8 @@ new video. The Roku app need not already be open.
 
 The supported site adapter is Cinejoy. Every play request discovers its current
 server menu and resolves fresh stream URLs. Failed candidates advance to the next
-server; no provider name or CDN hostname is pinned. Compatible H.264/AAC fragmented
-MP4 is repackaged into MPEG-TS HLS on demand. This is not a universal website
+server; no provider name or CDN hostname is pinned. Separate H.264/AAC fMP4 tracks keep their original initialization data and
+timestamps. Combined audio/video fMP4 is repackaged into MPEG-TS HLS on demand. This is not a universal website
 player: site layout changes, unsupported codecs, encrypted streams and expired
 URLs can fail. No DRM handling or full video transcoding is implemented.
 
@@ -32,8 +32,9 @@ roomcast stop
 
 Play is asynchronous. A `queued` response means accepted, not playing. Poll status
 until `job.state` is `playing` or `failed`; `roku.state` is the current playback
-state. Verification requires Media Assistant to be active and its position to
-advance without a reported error. Starting a new title while something is playing
+state. Verification requires the intended app and player, both audio and video
+formats, progressing playback and delivery from the new session. Playback is
+monitored after startup; paused, buffering, ended and failed states remain visible. Starting a new title while something is playing
 requires `--replace`.
 
 An agent can use `roomcast-mcp` over stdio instead of shell access. It exposes
@@ -115,9 +116,11 @@ these further to an exact hostname list; its default `null` permits the current
 public CDNs discovered by the site adapter. No caller can submit arbitrary URLs.
 `siteUrl` changes the origin for a compatible Cinejoy site after a domain migration;
 it does not make the adapter understand another website's layout. It rewrites nested playlists to opaque, session-scoped
-URLs and handles required provider request headers server-side. HLS initialization
-segments and media fragments are joined and passed to FFmpeg with `-c copy`.
-Original timestamps are preserved. No frame is decoded or encoded.
+URLs and handles required provider request headers server-side. Separate audio/video fMP4 keeps HLS initialization maps and original fragments.
+Combined fMP4 uses FFmpeg stream copy to MPEG-TS. Compressed media is not
+re-encoded for playback; complete segments are decoded locally for validation
+before being served. Provider codec hints are omitted and measured dimensions
+are published. See [playback verification](docs/video-preflight.md).
 
 Source resolution is lazy: the browser yields a server's current candidates,
 playback prepares and verifies them, and only failures advance to another server.
@@ -129,7 +132,8 @@ renewal and resume are not implemented.
 
 There is one active playback session. Responses share an LRU cache capped at
 128 MiB; four upstream jobs and two remux processes may run at once. Each media
-object is capped at 32 MiB, and a remux process has a ten-second deadline. A session
+object is capped at 32 MiB. Remux processes have a ten-second deadline, and
+complete-segment validation has a twenty-second deadline. A session
 expires after six hours. Stop invalidates its token and cancels its work. The
 first two segments of a requested media playlist are prefetched. Further segments
 are fetched when Roku asks, so the entire episode is not downloaded upfront.

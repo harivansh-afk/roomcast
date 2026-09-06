@@ -182,3 +182,79 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.network = SimpleNamespace(address="10.0.0.2")
         response = await self.client.get(f"/media/{session.token}/{session.root}")
         self.assertEqual(response.status, 404)
+
+    async def test_delivery_failure_is_recorded_and_never_served_as_media(self):
+        session = Session(AsyncMock(), config(), BASE + "main.m3u8", {}, "test")
+        self.service.session = session
+        session.get = AsyncMock(side_effect=ValueError("audio decode failed"))
+        response = await self.client.get(f"/media/{session.token}/{session.root}")
+        self.assertEqual(response.status, 502)
+        self.assertIn("audio decode failed", session.failure)
+        self.assertEqual(session.delivered, set())
+
+    async def test_stop_during_confirmation_closes_published_session(self):
+        entered = asyncio.Event()
+
+        async def sources(*args, **kwargs):
+            yield {
+                "title": "test",
+                "provider": "fixture",
+                "sources": [BASE + "video.m3u8"],
+                "headers": {},
+            }
+
+        async def confirm(**kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        self.service.resolver.resolve = sources
+        self.service.prepare = AsyncMock()
+        self.service.roku.launch = AsyncMock()
+        self.service.roku.confirm = confirm
+        await self.client.post("/play", json={"kind": "tv", "id": 1})
+        await asyncio.wait_for(entered.wait(), 1)
+        session = self.service.session
+        await self.client.post("/command/stop")
+        self.assertTrue(session.closed)
+        self.assertIsNone(self.service.session)
+        self.assertIsNone(self.service.monitor)
+
+    async def test_monitor_detects_track_loss_and_stall_but_allows_pause(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        for failure in ("audio", "stall", "pause"):
+            with self.subTest(failure=failure):
+                state = {
+                    "app_id": "782875",
+                    "player_app_id": "782875",
+                    "state": "play",
+                    "error": False,
+                    "position_ms": 2000,
+                    "audio_format": "aac",
+                    "video_format": "mpeg4_10b",
+                }
+                samples = [dict(state) for _ in range(5)]
+                if failure == "audio":
+                    for sample in samples:
+                        sample["audio_format"] = "none"
+                if failure == "pause":
+                    for sample in samples:
+                        sample["state"] = "pause"
+                    samples.append({"app_id": "another-app"})
+                self.service.roku.status = AsyncMock(side_effect=samples)
+                self.service.session = AsyncMock(failure=None)
+                times = iter(range(0, 200, 12))
+                with (
+                    patch("roomcast.server.asyncio.sleep", new=AsyncMock()),
+                    patch(
+                        "roomcast.server.time",
+                        SimpleNamespace(monotonic=lambda: next(times), time=lambda: 1),
+                    ),
+                ):
+                    await self.service.watch_playback("782875")
+                self.assertIsNone(self.service.session)
+                self.assertEqual(
+                    self.service.job_state["state"],
+                    "ended" if failure == "pause" else "failed",
+                )

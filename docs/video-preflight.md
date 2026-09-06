@@ -1,58 +1,70 @@
-# Compatible-video preflight
+# Playback verification
 
-Roomcast now samples actual media before launching non-YouTube playback. A
-successful fetch or advancing Roku clock alone is not evidence of visible video.
+A progressing Roku clock does not establish working picture and sound. Roomcast
+validates media before publishing it and checks the device during playback.
 
-## Supported path
+## Presentation selection and delivery
 
-- Require one H.264 Baseline/Main/High video stream, 8-bit 4:2:0, actual dimensions
-  no larger than 1920×1080 and the configured height cap, level no higher than
-  4.2, and bounded frame rate. This is a conservative FHD policy, not automatic
-  capability discovery for every Roku model.
-- Require supported audio (AAC-LC, AC3, EAC3 or MP3 with bounded channels/rate),
-  either multiplexed with video or in the master's associated audio group.
-- Probe representative upstream and remuxed fragments with ffprobe and locally
-  decode one relayed video frame. Audio-only and incomplete video-only playlist
-  candidates are rejected.
-- Try master variants in descending advertised resolution, validating actual
-  dimensions and encoding. A falsely advertised 1080p variant cannot bypass the
-  probe. Keep the selected video and its verified external audio group together.
-- Pin validated master and child playlist bytes outside the segment LRU, bounded
-  to 2 MiB per session. Eviction cannot refetch a reordered master and silently
-  switch to an unverified rendition. Stop clears pins and cancels preparation.
-- Keep `preflight` evidence separate from Roku status: `local_frame_decoded=true`
-  is local decoding only; `visual_verified=false` remains explicit.
+Select a compatible H.264 8-bit 4:2:0 presentation within the configured FHD limit,
+with supported audio. Actual decoded dimensions, profile and level decide
+compatibility. Publish measured dimensions and frame rate, and omit untrusted
+CODECS hints: a provider was advertising AVC level 5.0 for actual level 4.0,
+causing Roku to reject the master before requesting media.
 
-Probes use local files only with protocol/demuxer allowlists, bounded subprocess
-runtime/output, bounded playlist sizes and variant counts, and a 90-second
-per-candidate preflight ceiling. Existing URL validation, DNS/redirect guards,
-media authorization and explicit playback replacement rules remain in place.
+When a master references separate audio, select one usable default/autoselect
+track from its associated group. An unusable optional language does not reject
+an otherwise complete presentation. Require matching playlist durations and
+initial audio/video timestamps. Preserve the original fMP4 initialization maps,
+fragments and timestamps for separate tracks. Combined audio/video fMP4 continues
+to use the tested MPEG-TS stream-copy path. Do not convert standalone audio into
+an audio-only transport stream.
 
-## Verification
+Before launch, decode complete first, second, middle and final segments of each
+selected track. Verify actual decoded audio/video, codec constraints and segment
+durations. Every subsequently fetched media segment undergoes the same validation
+before it can be served, including after cache eviction. Black frames and silence
+can be intentional content and are not treated as corruption.
 
-- 47 tests pass, including generated FFmpeg video/audio fixtures and regression
-  checks for oversized actual video, incompatible profiles/pixel formats,
-  audio-only and video-only rejection, decode failure, external audio retention,
-  lower-rendition fallback, pinned playlist eviction and cancellation.
-- The Nix package builds with ffprobe supplied by the module and FFmpeg tools
-  available during checks. Ruff lint/format and whitespace checks pass.
-- A fresh read-only Silo S01E05 Lisbon lookup rejected higher variants and chose
-  actual 1440×720 H.264 Main level 3.2, retaining four AAC-LC stereo tracks. Local
-  frame decode succeeded. The chosen master remained stable after cache eviction;
-  the standalone video and audio candidates were rejected. No TV was launched.
+Pin selected playlists and initialization bytes within a shared 2 MiB budget.
+Segment responses remain in the bounded 128 MiB LRU. Four jobs and at most two
+remux processes run concurrently. FFmpeg reads local files only with explicit
+protocol/demuxer allowlists; its complete-segment decode has a 20-second deadline
+and a 1 MiB hash-output limit. Segments must be no longer than 30 seconds. The
+presentation preflight has a 90-second ceiling, and the whole startup request has
+a 110-second ceiling, including resolution and Roku confirmation.
 
-## Limits and acceptance still required
+Transient upstream HTTP/network errors retry up to three times within 70 seconds.
+Policy errors and permanent HTTP failures do not retry. Failed candidates advance
+to another source/provider during startup. Cancellation kills media subprocesses
+and invalidates published candidate sessions.
 
-This is not a promise of 100% playback. Source outages, signed URL expiration,
-network changes, corrupt later segments, changing encodings, device-specific
-quirks and DRM remain possible. It samples the first segment, not the whole
-movie. A local decoded frame does not prove the television displays a picture.
-No new transcoding path is included: unsupported sources fail clearly or advance
-to another candidate/provider. All advertised tracks in the chosen audio group
-must validate; a bad optional language track can cause conservative rejection.
-Nested masters, encrypted/byte-range streams and incomplete presentations remain
-unsupported. Preserving pinned VOD playlists does not renew expired media URLs.
+## Device verification
 
-Before deployment is called complete, authorize a Nix pin bump, deploy it, then
-verify the actual TV displays the correct episode with audible sound, pause/resume
-and sustained playback. Do not merge/deploy merely because a player clock moves.
+`playing` requires the intended Roku app and player, both reported audio/video
+formats, two consecutive advancing position samples, and delivery of both tracks
+from the new relay session. Native YouTube requires the same device checks; its
+media delivery is owned by the YouTube app.
+
+After startup, poll every three seconds. Reflect pauses, buffering and app changes;
+report a failure for a missing track lasting nine seconds, playback stalled for
+30 seconds, Roku errors or failed segment delivery. Ended/failed sessions close
+and release their resources. Runtime failure does not silently restart the title
+or claim success; seamless provider replacement at the current position is not
+implemented.
+
+`preflight` contains local media evidence. `roku` contains device observations.
+`visual_verified=false` remains explicit because ECP cannot see the television or
+hear its speakers. Physical confirmation is recorded in acceptance notes.
+
+## Boundaries
+
+Unsupported codecs, encryption, byte ranges, live/nested HLS, corrupt upstream
+content and expired URLs can still fail. There is no video transcoder or DRM
+handling. A source can serve wrong content that is technically valid. Device
+telemetry cannot prove picture quality, audible speaker output or full-episode
+playback; these are not promised by passing startup checks.
+
+Regression tests generate real fMP4 and MPEG-TS fixtures and cover separate and
+combined tracks, missing audio/video, bad later segments, changed cached media,
+initialization pinning, false codec metadata, source/track fallback, retries,
+cancellation, missing device tracks, stalled playback and pause/resume state.

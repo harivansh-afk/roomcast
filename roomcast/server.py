@@ -49,12 +49,93 @@ class Service:
         self.session = None
         self.control_lock = asyncio.Lock()
         self.job = None
+        self.monitor = None
         self.job_state = {"state": "idle"}
+
+    async def stop_monitor(self):
+        if self.monitor:
+            self.monitor.cancel()
+            await asyncio.gather(self.monitor, return_exceptions=True)
+            self.monitor = None
+
+    def watch(self, app_id):
+        self.monitor = asyncio.create_task(self.watch_playback(app_id))
+
+    async def watch_playback(self, app_id):
+        last_position = None
+        last_progress = time.monotonic()
+        unhealthy_since = None
+        while True:
+            await asyncio.sleep(3)
+            try:
+                state = await self.roku.status()
+                now = time.monotonic()
+                if state["app_id"] != app_id:
+                    self.job_state["state"] = "ended"
+                    break
+                if self.session and self.session.failure:
+                    raise ValueError(self.session.failure)
+                if state.get("error"):
+                    raise ValueError("Roku reported a playback error")
+                if state["state"] == "pause":
+                    self.job_state["state"] = "paused"
+                    last_progress, unhealthy_since = now, None
+                    continue
+                if state["state"] in ("stop", "close", "finished"):
+                    duration = state.get("duration_ms", 0)
+                    if duration and state.get("position_ms", 0) >= duration - 3000:
+                        self.job_state["state"] = "ended"
+                        break
+                    raise ValueError("Roku stopped before the end of the video")
+                if state.get("player_app_id") != app_id or not self.roku.has_av(state):
+                    unhealthy_since = unhealthy_since or now
+                    self.job_state["state"] = "buffering"
+                    if now - unhealthy_since >= 9:
+                        raise ValueError("Roku lost the audio or video track")
+                else:
+                    unhealthy_since = None
+                    self.job_state["state"] = (
+                        "playing" if state["state"] == "play" else "buffering"
+                    )
+                position = state.get("position_ms", 0)
+                if last_position is None or position != last_position:
+                    last_progress = now
+                elif now - last_progress >= 30:
+                    raise ValueError("Roku playback stalled for 30 seconds")
+                last_position = position
+                self.job_state["checked_at"] = time.time()
+            except asyncio.CancelledError:
+                raise
+            except ValueError as error:
+                self.job_state.update(state="failed", error=str(error))
+                logging.warning("playback failed: %s", error)
+                break
+            except Exception as error:
+                self.job_state["state"] = "buffering"
+                if time.monotonic() - last_progress >= 30:
+                    self.job_state.update(
+                        state="failed",
+                        error=f"TV status unavailable ({type(error).__name__})",
+                    )
+                    break
+        if self.session:
+            await self.session.close()
+            self.session = None
 
     async def prepare(self, session):
         return await session.prepare()
 
     async def play(self, body):
+        try:
+            async with asyncio.timeout(110):
+                await self._play(body)
+        except TimeoutError:
+            self.job_state.update(
+                state="failed", error="playback startup exceeded 110 seconds"
+            )
+
+    async def _play(self, body):
+        await self.stop_monitor()
         started = time.monotonic()
         self.job_state = {"state": "resolving", "started_at": time.time()}
         candidate = None
@@ -73,6 +154,7 @@ class Service:
                     provider="YouTube",
                     startup_seconds=round(time.monotonic() - started, 3),
                 )
+                self.watch("837")
                 return
             if body["kind"] == "browser":
                 sources = self.browser.selected(body["id"])
@@ -112,11 +194,18 @@ class Service:
                                 candidate.link(candidate.root), candidate.title
                             )
                             self.job_state["state"] = "verifying"
-                            await self.roku.confirm()
+
+                            def delivered():
+                                if candidate.failure:
+                                    raise ValueError(candidate.failure)
+                                return {"audio", "video"} <= candidate.delivered
+
+                            await self.roku.confirm(delivered=delivered)
                             self.job_state.update(
                                 state="playing",
                                 startup_seconds=round(time.monotonic() - started, 3),
                             )
+                            self.watch(self.roku.app_id)
                             return
                         except Exception as error:
                             failures.append(
@@ -127,6 +216,7 @@ class Service:
                                     else type(error).__name__
                                 )
                             )
+                            logging.warning("candidate failed: %s", failures[-1])
                             await candidate.close()
                             if self.session is candidate:
                                 self.session = None
@@ -138,8 +228,10 @@ class Service:
                 else "no supported source found; site may have changed"
             )
         except asyncio.CancelledError:
-            if candidate and candidate is not self.session:
+            if candidate:
                 await candidate.close()
+                if self.session is candidate:
+                    self.session = None
             self.job_state["state"] = "cancelled"
             raise
         except Exception as error:
@@ -307,6 +399,7 @@ class Service:
         if command not in self.roku.commands:
             raise ValueError("unsupported command")
         if command in ("stop", "home"):
+            await self.stop_monitor()
             if self.job and not self.job.done():
                 self.job.cancel()
                 await asyncio.gather(self.job, return_exceptions=True)
@@ -332,7 +425,15 @@ class Service:
         key = request.match_info["key"]
         if key not in session.resources:
             raise web.HTTPNotFound()
-        data, content_type = await session.get(key)
+        try:
+            data, content_type = await session.get(key)
+        except Exception as error:
+            reason = (
+                str(error) if isinstance(error, ValueError) else type(error).__name__
+            )
+            session.failure = "media delivery failed: " + reason[:200]
+            logging.warning("%s", session.failure)
+            raise web.HTTPBadGateway(text=session.failure) from None
         # Roku normally requests whole HLS segments; implement a single byte range for clients that do not.
         headers = {"Cache-Control": "private, max-age=60", "Accept-Ranges": "bytes"}
         if value := request.headers.get("Range"):
@@ -344,15 +445,27 @@ class Service:
             if start > end or start >= len(data):
                 raise web.HTTPRequestRangeNotSatisfiable()
             headers["Content-Range"] = f"bytes {start}-{end}/{len(data)}"
+            if request.method != "HEAD":
+                self.record_delivery(session, key)
             return web.Response(
                 body=data[start : end + 1],
                 status=206,
                 content_type=content_type,
                 headers=headers,
             )
+        if request.method != "HEAD":
+            self.record_delivery(session, key)
         return web.Response(body=data, content_type=content_type, headers=headers)
 
+    @staticmethod
+    def record_delivery(session, key):
+        role = session.resources[key].role
+        session.delivered.update(
+            ("video", "audio") if role == "muxed" else (role,) if role else ()
+        )
+
     async def close(self):
+        await self.stop_monitor()
         if self.job:
             self.job.cancel()
             await asyncio.gather(self.job, return_exceptions=True)

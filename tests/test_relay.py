@@ -82,6 +82,7 @@ class PlaylistTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             self.session.rewrite(source, BASE + "master.m3u8")
         self.session.selections[BASE + "master.m3u8"] = 4
+        self.session.audio_selections[BASE + "master.m3u8"] = 1
         rewritten, segments = self.session.rewrite(source, BASE + "master.m3u8")
         self.assertNotIn(b"2160", rewritten)
         self.assertNotIn(b"1280", rewritten)
@@ -105,7 +106,7 @@ part2.png
 #EXT-X-ENDLIST
 """
         rewritten, segments = self.session.rewrite(source, BASE + "720p/playlist.jpg")
-        self.assertNotIn(b"EXT-X-MAP", rewritten)
+        self.assertIn(b"EXT-X-MAP", rewritten)
         self.assertEqual(len(segments), 2)
         self.assertEqual(
             self.session.resources[segments[0]].init, BASE + "720p/init.mp4"

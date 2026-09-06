@@ -1,5 +1,6 @@
 """Media must use public HTTPS endpoints; deployments may further restrict hosts."""
 
+import asyncio
 import ipaddress
 import socket
 from urllib.parse import urljoin, urlsplit
@@ -53,6 +54,21 @@ class Fetcher:
         )
 
     async def get(self, url, headers, limit=32 * 1024 * 1024):
+        try:
+            async with asyncio.timeout(70):
+                for attempt in range(3):
+                    try:
+                        return await self._get(url, headers, limit)
+                    except (aiohttp.ClientError, TimeoutError, TemporaryUpstreamError):
+                        if attempt == 2:
+                            raise ValueError(
+                                "upstream unavailable after three attempts"
+                            ) from None
+                        await asyncio.sleep(0.25 * (2**attempt))
+        except TimeoutError:
+            raise ValueError("upstream retry deadline exceeded") from None
+
+    async def _get(self, url, headers, limit):
         for _ in range(5):
             validate_url(url, self.hosts)
             async with self.client.get(
@@ -62,6 +78,8 @@ class Fetcher:
                     url = urljoin(url, response.headers.get("Location", ""))
                     continue
                 if response.status != 200:
+                    if response.status in (408, 429, 500, 502, 503, 504):
+                        raise TemporaryUpstreamError()
                     raise ValueError(f"upstream HTTP {response.status}")
                 if response.content_length and response.content_length > limit:
                     raise ValueError("upstream object exceeds limit")
@@ -76,3 +94,7 @@ class Fetcher:
 
     async def close(self):
         await self.client.close()
+
+
+class TemporaryUpstreamError(Exception):
+    pass
