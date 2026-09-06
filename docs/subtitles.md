@@ -9,7 +9,7 @@ no supported tracks reports that fact and continues video/audio playback.
 
 Build `nix build .#roku-player` and install `result/roomcast-player.zip` using the
 Roku development installer when viewing has finished. This version is Roomcast
-Player 1.3.3. Sideloading replaces the existing `dev` app. Configure the service:
+Player 1.3.4. Sideloading replaces the existing `dev` app. Configure the service:
 
 ```nix
 services.roomcast = {
@@ -26,6 +26,14 @@ The last two values are the defaults. JSON config uses `roku_subtitle_control`,
 disabled for stock Media Assistant or the older 1.3.2 player; neither implements
 this control protocol. No TV settings or service configuration are changed by
 building or merging this package.
+
+Use 1.3.4 for provider subtitle files. In 1.3.3, the subtitle JSON was parsed into
+case-sensitive associative arrays. The TV's ContentNode stored the mixed-case
+`Language`, `Description`, and `TrackName` entries as empty fields, leaving its
+available-track list empty even with captions On. The player now uses Roku's
+documented [case-insensitive JSON parsing](https://developer.roku.com/dev/docs/global-utility-functions)
+before assigning those entries to the ContentNode. Subtitle URLs and cue times
+remain intact.
 
 ## Use
 
@@ -109,8 +117,12 @@ stale/foreign acknowledgements, missing acknowledgement, cancellation and
 caption errors that leave audio/video running. The player is compiled with
 BrighterScript 0.73.1 and packaged through the Nix check.
 
-Live acceptance is pending. Verify visible English captions on a fresh episode,
+The first live 1.3.3 playback confirmed a 10-minute start with progressing audio
+and video, but exposed the empty subtitle metadata described above. Player 1.3.4
+passes package and compiler checks; its live subtitle acceptance is pending.
+After viewing has finished, install the updated player and verify visible English
+captions on a fresh episode,
 on/off and language changes during play and pause, the remote caption menu,
 caption synchronization after a 20-minute start and forward/backward seeks, and
-clear missing-caption behavior. No live TV commands or installation were used
-to develop this change.
+clear missing-caption behavior. Record the current position and pause state
+before replacing the player, and restore the same episode after installation.

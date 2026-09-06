@@ -7,7 +7,7 @@
 }:
 stdenvNoCC.mkDerivation {
   pname = "roomcast-roku-player";
-  version = "1.3.3";
+  version = "1.3.4";
   src = fetchFromGitHub {
     owner = "MedievalApple";
     repo = "Media-Assistant";

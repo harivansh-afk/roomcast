@@ -64,7 +64,8 @@ roomcast subtitles --language hi
 ```
 
 The MCP tool is `subtitles(enabled=True, language="en")`; call it without arguments
-to list tracks and reported player state. This needs Roomcast Player 1.3.3 or later.
+to list tracks and reported player state. Install Roomcast Player 1.3.4 for the
+provider subtitle metadata fix.
 Sources without supported subtitles are reported as unavailable.
 
 An agent can use `roomcast-mcp` over stdio instead of shell access. It exposes
