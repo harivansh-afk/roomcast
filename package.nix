@@ -1,9 +1,24 @@
-{ lib, python3Packages }:
+{
+  lib,
+  python3Packages,
+  ruff,
+}:
+let
+  project = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project;
+in
 python3Packages.buildPythonApplication {
-  pname = "roomcast";
-  version = "0.1.0";
+  pname = project.name;
+  inherit (project) version;
   pyproject = true;
-  src = lib.cleanSource ./.;
+  src = lib.fileset.toSource {
+    root = ./.;
+    fileset = lib.fileset.unions [
+      ./pyproject.toml
+      ./roomcast
+      ./tests
+      ./LICENSE
+    ];
+  };
   build-system = [ python3Packages.setuptools ];
   dependencies = with python3Packages; [
     aiohttp
@@ -14,13 +29,16 @@ python3Packages.buildPythonApplication {
     "roomcast.server"
     "roomcast.cli"
   ];
+  nativeCheckInputs = [ ruff ];
   checkPhase = ''
     runHook preCheck
+    ruff check roomcast tests
+    ruff format --check roomcast tests
     python -m unittest discover -s tests -v
     runHook postCheck
   '';
   meta = {
-    description = "Local Roku streaming relay and constrained playback API";
+    inherit (project) description;
     mainProgram = "roomcast";
     platforms = lib.platforms.linux;
     license = lib.licenses.gpl3Only;
