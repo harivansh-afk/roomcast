@@ -40,7 +40,21 @@ class Session:
             "segments_remuxed": 0,
             "fetch_seconds": 0.0,
         }
+        self.selections = {}
+        self.playlists = {}
+        self.preflight = {"state": "unchecked", "visual_verified": False}
         self.root = self.register(source)
+
+    async def prepare(self):
+        from .preflight import prepare
+
+        task = asyncio.create_task(prepare(self))
+        self.tasks.add(task)
+        try:
+            await task
+            return self.preflight
+        finally:
+            self.tasks.discard(task)
 
     def register(self, url, init=None):
         validate_url(url, self.config.allowed_hosts)
@@ -64,7 +78,17 @@ class Session:
             _, old = self.cache.popitem(last=False)
             self.cache_size -= len(old[0])
 
+    def pin_playlist(self, url, body, final):
+        if (
+            sum(len(v[0]) for k, v in self.playlists.items() if k != url) + len(body)
+            > 2 * 1024 * 1024
+        ):
+            raise ValueError("pinned playlist budget exceeded")
+        self.playlists[url] = (body, final)
+
     async def raw(self, url):
+        if url in self.playlists:
+            return self.playlists[url]
         key = ("raw", url)
         if key in self.cache:
             self.cache.move_to_end(key)
@@ -99,15 +123,28 @@ class Session:
                 variants.append((int(match[1]) if match else 0, index))
         chosen = None
         if variants:
-            eligible = [v for v in variants if v[0] <= self.config.max_height]
-            if not eligible:
-                raise ValueError("no variant within configured resolution limit")
-            chosen = max(eligible)[1]
+            chosen = self.selections.get(base)
+            if chosen not in {i for _, i in variants}:
+                raise ValueError("master requires compatibility preflight")
         skipped = {i for _, i in variants if i != chosen}
+        audio_group = None
+        if chosen is not None:
+            from .preflight import attributes, value
+
+            audio_group = value(attributes(lines[chosen]), "AUDIO")
         init = None
         output, segments = [], []
         for index, line in enumerate(lines):
             if index in skipped or index - 1 in skipped:
+                continue
+            if variants and line.startswith("#EXT-X-MEDIA:"):
+                attrs = attributes(line)
+                if (
+                    value(attrs, "TYPE") != "AUDIO"
+                    or value(attrs, "GROUP-ID") != audio_group
+                ):
+                    continue
+            if line.startswith("#EXT-X-I-FRAME-STREAM-INF:"):
                 continue
             if line.startswith("#EXT-X-MAP:"):
                 match = re.search(r'URI="([^"]+)"', line)
@@ -152,6 +189,8 @@ class Session:
                     "error",
                     "-protocol_whitelist",
                     "file",
+                    "-format_whitelist",
+                    "mov,mpegts,aac,ac3,eac3,mp3",
                     "-copyts",
                     "-i",
                     str(src),
@@ -167,6 +206,8 @@ class Session:
                     "0",
                     "-muxpreload",
                     "0",
+                    "-fs",
+                    "41943040",
                     "-f",
                     "mpegts",
                     str(dest),
@@ -237,5 +278,7 @@ class Session:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        self.playlists.clear()
+        self.selections.clear()
         self.cache.clear()
         self.cache_size = 0
