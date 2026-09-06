@@ -37,6 +37,21 @@ formats, progressing playback and delivery from the new session. Playback is
 monitored after startup; paused, buffering, ended and failed states remain visible. Starting a new title while something is playing
 requires `--replace`.
 
+To start at a timestamp or scrub by text, install the optional
+[Roomcast Roku player](docs/timestamp-seeking.md) and enable its capability in
+the service config. Stock Media Assistant supports its native remote seek UI,
+but does not accept Roomcast timestamp commands.
+
+```sh
+roomcast play tv 236235 --season 1 --episode 1 --start 20:00
+roomcast seek --to 20:00
+roomcast seek -30
+```
+
+The MCP equivalents are `play(..., start_seconds=1200)` and
+`seek(seconds=1200, mode="absolute")`. A failed or unconfirmed seek reports an
+error; paused playback must remain paused. `stop` also cancels a pending seek.
+
 An agent can use `roomcast-mcp` over stdio instead of shell access. It exposes
 search, playback, status, controls, seeking, source discovery and isolated browsing; it does not accept arbitrary source URLs,
 file paths or shell commands. Configure the client with:
@@ -138,9 +153,10 @@ expires after six hours. Stop invalidates its token and cancels its work. The
 first two segments of a requested media playlist are prefetched. Further segments
 are fetched when Roku asks, so the entire episode is not downloaded upfront.
 
-The full VOD playlist remains available for Roku's native seek UI. Absolute
-seek-by-text, subtitle selection, recovery after upstream URL expiry and persistent
-resume positions are not implemented yet. Pause/resume and stop are supported.
+The full VOD playlist remains available for Roku's native seek UI, including
+positions before a requested start timestamp. Subtitle selection, recovery after
+upstream URL expiry and persistent resume positions are not implemented yet.
+Pause/resume and stop are supported.
 A service restart ends the relay session; request playback again.
 
 ## Browser isolation

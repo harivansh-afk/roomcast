@@ -1,4 +1,5 @@
 import asyncio
+import time
 import xml.etree.ElementTree as ET
 from urllib.parse import urlencode
 
@@ -19,9 +20,10 @@ class Roku:
         "power_on": "PowerOn",
     }
 
-    def __init__(self, ip, serial):
+    def __init__(self, ip, serial, app_id="782875"):
         self.base = f"http://{ip}:8060"
         self.serial = serial
+        self.app_id = app_id
         self.client = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=8), trust_env=False
         )
@@ -95,7 +97,7 @@ class Roku:
             for key in ("audio_format", "video_format")
         )
 
-    async def launch(self, url, title):
+    async def launch(self, url, title, start_seconds=0):
         await self.verify()
         await self.request(
             f"/launch/{self.app_id}",
@@ -104,6 +106,7 @@ class Roku:
                 "t": "v",
                 "videoFormat": "hls",
                 "videoName": title,
+                **({"startSeconds": start_seconds} if start_seconds else {}),
             },
         )
 
@@ -124,10 +127,12 @@ class Roku:
         await self.request("/keypress/" + self.commands[command], {})
         return await self.status()
 
-    async def confirm(self, seconds=30, app_id=None, delivered=None):
+    async def confirm(self, seconds=30, app_id=None, delivered=None, start_seconds=0):
         app_id = app_id or self.app_id
         previous = None
         progressing = 0
+        first_position = None
+        started = time.monotonic()
         try:
             async with asyncio.timeout(seconds):
                 while True:
@@ -136,6 +141,22 @@ class Roku:
                     if state["app_id"] == app_id and state["player_app_id"] == app_id:
                         if state["error"]:
                             raise ValueError("Roku rejected the stream")
+                        if (
+                            start_seconds
+                            and first_position is None
+                            and state["state"] == "play"
+                            and self.has_av(state)
+                            and (delivered is None or delivered())
+                        ):
+                            first_position = state["position_ms"] / 1000
+                            if (
+                                not start_seconds - 2
+                                <= first_position
+                                <= start_seconds + time.monotonic() - started + 2
+                            ):
+                                raise ValueError(
+                                    "Roku did not start at the requested timestamp"
+                                )
                         if (
                             state["state"] == "play"
                             and self.has_av(state)
@@ -150,10 +171,71 @@ class Roku:
                             progressing = 0
                         previous = state["position_ms"]
                     else:
-                        previous, progressing = None, 0
+                        previous, progressing, first_position = None, 0, None
         except TimeoutError:
             raise ValueError(
                 "Roku did not confirm progressing audio and video before startup timeout"
+            ) from None
+
+    async def seek_to(self, target, before):
+        await self.verify()
+        started = time.monotonic()
+        await self.request(
+            "/input",
+            {
+                "a": "seek",
+                "positionSeconds": target,
+                "stayPaused": "true" if before["state"] == "pause" else "false",
+            },
+        )
+        return await self.confirm_seek(target, before, started=started)
+
+    async def confirm_seek(self, target, before, seconds=30, started=None):
+        started = time.monotonic() if started is None else started
+        initial = before["position_ms"] / 1000
+        paused = before["state"] == "pause"
+        app_id = before["app_id"]
+        first = None
+        try:
+            async with asyncio.timeout(seconds):
+                while True:
+                    await asyncio.sleep(0.5)
+                    state = await self.status()
+                    if state["app_id"] != app_id or state.get("error"):
+                        raise ValueError(
+                            "TV app changed or reported an error during seek"
+                        )
+                    if state["player_app_id"] != app_id or not self.has_av(state):
+                        continue
+                    if state["state"] != ("pause" if paused else "play"):
+                        continue
+                    position = state["position_ms"] / 1000
+                    if first is None:
+                        # Natural progression through the target is not proof that
+                        # an ignored seek command worked.
+                        natural = initial + (
+                            0 if paused else time.monotonic() - started
+                        )
+                        if abs(position - natural) <= 2 and abs(initial - target) > 2:
+                            continue
+                        if abs(position - target) > 2:
+                            continue
+                        first = position, time.monotonic()
+                    elif paused or position > first[0]:
+                        expected = first[0] + (
+                            0 if paused else time.monotonic() - first[1]
+                        )
+                        if abs(position - expected) <= 2:
+                            return {
+                                "confirmed": True,
+                                "target_seconds": target,
+                                "actual_seconds": position,
+                                "tolerance_seconds": 2,
+                                "roku": state,
+                            }
+        except TimeoutError:
+            raise ValueError(
+                "Roku did not confirm the requested seek position"
             ) from None
 
     async def close(self):

@@ -21,6 +21,15 @@ from .roku import Roku
 from .youtube import YouTube
 
 
+class InvalidPosition(ValueError):
+    pass
+
+
+def check_position(target, duration):
+    if not duration or not 0 <= target < duration:
+        raise InvalidPosition("timestamp must be within a video with a known duration")
+
+
 @web.middleware
 async def errors(request, handler):
     try:
@@ -42,7 +51,7 @@ class Service:
         self.youtube = YouTube(config.youtube_auth)
         self.directory = Directory(config.directory_url, config.directory_cache)
         self.fetcher = Fetcher(config.allowed_hosts)
-        self.roku = Roku(config.roku_ip, config.roku_serial)
+        self.roku = Roku(config.roku_ip, config.roku_serial, config.roku_app_id)
         self.network = Network(config, self.roku) if config.lan_interface else None
         self.resolver = Resolver(config)
         self.browser = Browser(self.resolver)
@@ -137,6 +146,7 @@ class Service:
     async def _play(self, body):
         await self.stop_monitor()
         started = time.monotonic()
+        start = body.get("start_seconds", 0)
         self.job_state = {"state": "resolving", "started_at": time.time()}
         candidate = None
         failures = []
@@ -148,7 +158,16 @@ class Service:
                 self.job_state["state"] = "launching"
                 await self.roku.launch_youtube(body["id"])
                 self.job_state["state"] = "verifying"
-                await self.roku.confirm(app_id="837")
+                before = await self.roku.confirm(app_id="837")
+                if start:
+                    check_position(start, before.get("duration_ms", 0) / 1000)
+                    self.job_state["state"] = "seeking"
+                    seek_started = time.monotonic()
+                    await self.youtube.seek(start)
+                    result = await self.roku.confirm_seek(
+                        start, before, started=seek_started
+                    )
+                    self.job_state["seek"] = result
                 self.job_state.update(
                     state="playing",
                     provider="YouTube",
@@ -186,12 +205,19 @@ class Service:
                                 await self.prepare(candidate)
                             finally:
                                 self.job_state["preflight"] = candidate.preflight
+                            if start:
+                                check_position(
+                                    start,
+                                    candidate.preflight.get("duration_seconds", 0),
+                                )
                             previous, self.session = self.session, candidate
                             if previous:
                                 await previous.close()
                             self.job_state["state"] = "launching"
                             await self.roku.launch(
-                                candidate.link(candidate.root), candidate.title
+                                candidate.link(candidate.root),
+                                candidate.title,
+                                **({"start_seconds": start} if start else {}),
                             )
                             self.job_state["state"] = "verifying"
 
@@ -200,7 +226,15 @@ class Service:
                                     raise ValueError(candidate.failure)
                                 return {"audio", "video"} <= candidate.delivered
 
-                            await self.roku.confirm(delivered=delivered)
+                            state = await self.roku.confirm(
+                                delivered=delivered,
+                                **({"start_seconds": start} if start else {}),
+                            )
+                            if start:
+                                self.job_state.update(
+                                    start_seconds=start,
+                                    actual_seconds=state["position_ms"] / 1000,
+                                )
                             self.job_state.update(
                                 state="playing",
                                 startup_seconds=round(time.monotonic() - started, 3),
@@ -221,6 +255,8 @@ class Service:
                             if self.session is candidate:
                                 self.session = None
                             candidate = None
+                            if isinstance(error, InvalidPosition):
+                                raise
                     self.job_state["state"] = "resolving"
             raise ValueError(
                 "sources failed: " + "; ".join(failures)
@@ -255,8 +291,11 @@ class Service:
             "episode",
             "replace",
             "source",
+            "start_seconds",
         }:
-            raise ValueError("expected kind, id, season, episode, replace")
+            raise ValueError(
+                "expected kind, id, season, episode, replace, source, start_seconds"
+            )
         if self.job and not self.job.done():
             raise web.HTTPConflict(text="a playback request is already running")
         if body.get("kind") == "browser":
@@ -282,14 +321,28 @@ class Service:
             raise ValueError("invalid season or episode")
         if type(body.get("replace", False)) is not bool:
             raise ValueError("replace must be a boolean")
+        start = body.get("start_seconds", 0)
+        if type(start) is not int or not 0 <= start <= 21600:
+            raise ValueError("start_seconds must be an integer from 0 to 21600")
+        if start:
+            if body["kind"] == "youtube":
+                if not self.youtube.path.exists():
+                    raise ValueError("Pair YouTube before requesting a start timestamp")
+            else:
+                self.require_seeking_player()
         if self.network:
             await self.network.ensure()
             self.config.public_base = (
                 f"http://{self.network.local_address}:{self.config.lan_port}"
             )
         current = await self.roku.status()
-        if current["state"] == "play" and body.get("replace") is not True:
-            raise web.HTTPConflict(text="TV is playing; explicit replace=true required")
+        if (
+            current["state"] in ("play", "pause", "buffer")
+            and body.get("replace") is not True
+        ):
+            raise web.HTTPConflict(
+                text="TV has active playback; explicit replace=true required"
+            )
         self.job_state = {"state": "queued"}
         self.job = asyncio.create_task(self.play(body))
         return web.json_response(self.job_state, status=202)
@@ -353,35 +406,86 @@ class Service:
         results = await self.resolver.search(query, origin=origin)
         return web.json_response([{**item, "source": source} for item in results])
 
+    def require_seeking_player(self):
+        if not self.config.roku_seek_enabled:
+            raise ValueError(
+                "Timestamp commands require the optional Roomcast Roku player; "
+                "install it and configure roku_app_id and roku_seek_enabled first"
+            )
+
     async def seek(self, request):
         async with self.control_lock:
             if self.job and not self.job.done():
                 raise web.HTTPConflict(text="wait for playback before seeking")
+            body = await request.json()
+            if not isinstance(body, dict) or set(body) - {"seconds", "mode"}:
+                raise ValueError("expected seconds and optional mode")
+            seconds, mode = body.get("seconds"), body.get("mode", "relative")
+            if mode not in ("relative", "absolute"):
+                raise ValueError("mode must be relative or absolute")
+            if type(seconds) is not int or not (
+                0 <= seconds <= 21600
+                if mode == "absolute"
+                else 1 <= abs(seconds) <= 3600
+            ):
+                raise ValueError(
+                    "absolute seconds must be 0..21600; relative seconds must be nonzero and within one hour"
+                )
             if self.network:
                 await self.network.ensure()
-            body = await request.json()
-            if not isinstance(body, dict) or set(body) != {"seconds"}:
-                raise ValueError("expected seconds")
-            seconds = body["seconds"]
-            if type(seconds) is not int or not 1 <= abs(seconds) <= 3600:
-                raise ValueError("seconds must be a nonzero integer within one hour")
             before = await self.roku.status()
             if before["app_id"] != "837":
-                raise ValueError("Precise seeking currently requires YouTube")
-            target = max(0, before["position_ms"] / 1000 + seconds)
-            await self.youtube.seek(target)
-            for _ in range(5):
-                await asyncio.sleep(1)
-                after = await self.roku.status()
-                if after["app_id"] != "837":
-                    raise ValueError("TV app changed during seek")
-                if abs(after["position_ms"] / 1000 - target) < 6:
-                    return web.json_response(
-                        {"confirmed": True, "target_seconds": target, "roku": after}
-                    )
-            raise ValueError(
-                "YouTube seek was sent but the TV did not confirm the target position"
+                self.require_seeking_player()
+                if before["app_id"] != self.roku.app_id:
+                    raise ValueError("The configured Roomcast player is not active")
+            if (
+                before["state"] not in ("play", "pause")
+                or before.get("player_app_id") != before["app_id"]
+            ):
+                raise ValueError(
+                    "Wait for the video to be playing or paused before seeking"
+                )
+            target = (
+                seconds
+                if mode == "absolute"
+                else max(0, before["position_ms"] // 1000 + seconds)
             )
+            check_position(target, before.get("duration_ms", 0) / 1000)
+            await self.stop_monitor()
+            self.job_state.update(state="seeking", target_seconds=target)
+            self.job = job = asyncio.create_task(self.perform_seek(target, before))
+        try:
+            return web.json_response(await asyncio.shield(job))
+        except asyncio.CancelledError:
+            if job.cancelled():
+                raise web.HTTPConflict(text="seek cancelled by stop or home") from None
+            raise
+
+    async def perform_seek(self, target, before):
+        try:
+            async with asyncio.timeout(65):
+                if before["app_id"] == "837":
+                    started = time.monotonic()
+                    await self.youtube.seek(target)
+                    result = await self.roku.confirm_seek(
+                        target, before, started=started
+                    )
+                else:
+                    result = await self.roku.seek_to(target, before)
+            self.job_state.pop("seek_error", None)
+            self.job_state.update(
+                state="paused" if before["state"] == "pause" else "playing",
+                seek=result,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.job_state.update(state="seek_failed", seek_error=str(error)[:300])
+            self.watch(before["app_id"])
+            raise
+        else:
+            self.watch(before["app_id"])
+            return result
 
     async def pair_youtube(self, request):
         async with self.control_lock:

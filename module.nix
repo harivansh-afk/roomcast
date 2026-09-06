@@ -10,6 +10,8 @@ let
     builtins.toJSON {
       roku_ip = cfg.rokuAddress;
       roku_serial = cfg.rokuSerial;
+      roku_app_id = cfg.playerAppId;
+      roku_seek_enabled = cfg.playerSupportsSeeking;
       lan_interface = cfg.lanInterface;
       lan_port = cfg.port;
       discovery_port = cfg.discoveryPort;
@@ -42,6 +44,16 @@ in
     rokuSerial = lib.mkOption {
       type = lib.types.str;
       description = "Expected Roku serial number, verified before control commands.";
+    };
+    playerAppId = lib.mkOption {
+      type = lib.types.strMatching "([0-9]+|dev)";
+      default = "782875";
+      description = "Roku playback app ID. Use dev after sideloading the optional Roomcast player.";
+    };
+    playerSupportsSeeking = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Enable timestamp commands after installing the Roomcast player. Stock Media Assistant does not implement them.";
     };
     lanInterface = lib.mkOption {
       type = lib.types.str;
@@ -91,6 +103,12 @@ in
     };
   };
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !cfg.playerSupportsSeeking || cfg.playerAppId != "782875";
+        message = "Roomcast timestamp commands require the optional Roomcast player, not stock Media Assistant.";
+      }
+    ];
     users.groups.roomcast = { };
     users.users.roomcast = {
       isSystemUser = true;

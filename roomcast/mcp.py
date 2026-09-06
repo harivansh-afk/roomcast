@@ -24,10 +24,13 @@ async def play(
     episode: int = 1,
     replace: bool = False,
     source: str = "cinejoy",
+    start_seconds: int = 0,
 ) -> dict:
     """Start an episode, movie, YouTube video or captured browser stream. Poll status; queued is not confirmation.
 
     Set replace only when the user intends to interrupt current viewing.
+    start_seconds is an absolute timestamp (1200 = 20 minutes). Nonzero starts
+    require the optional Roomcast Roku player, or paired YouTube.
     """
     return await call(
         SOCKET,
@@ -40,6 +43,7 @@ async def play(
             "episode": episode,
             "replace": replace,
             "source": source,
+            "start_seconds": start_seconds,
         },
     )
 
@@ -57,12 +61,17 @@ async def control(command: Command) -> dict:
 
 
 @app.tool()
-async def seek(seconds: int) -> dict:
-    """Move paired YouTube playback by a signed number of seconds (maximum 3600).
+async def seek(
+    seconds: int, mode: Literal["relative", "absolute"] = "relative"
+) -> dict:
+    """Seek the current video. Use mode="absolute", seconds=1200 for 20:00;
+    relative signed seconds skip forward/backward (maximum 3600).
 
-    Returns confirmed only after the TV reports the requested position.
+    Requires the optional Roomcast Roku player or paired YouTube. Paused playback
+    stays paused. Returns confirmed only after the TV reports the target within
+    two seconds with both audio and video; otherwise fails. Stop cancels a seek.
     """
-    return await call(SOCKET, "POST", "/seek", data={"seconds": seconds})
+    return await call(SOCKET, "POST", "/seek", data={"seconds": seconds, "mode": mode})
 
 
 @app.tool()

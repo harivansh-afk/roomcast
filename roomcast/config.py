@@ -1,5 +1,6 @@
 import ipaddress
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -11,6 +12,8 @@ from .fetch import validate_url
 class Config:
     roku_ip: str | None
     roku_serial: str
+    roku_app_id: str = "782875"
+    roku_seek_enabled: bool = False
     public_base: str = "http://127.0.0.1:18795"
     lan_interface: str | None = None
     lan_port: int = 18795
@@ -35,6 +38,16 @@ class Config:
     allowed_hosts: list[str] | None = None
 
     def __post_init__(self):
+        if not isinstance(self.roku_app_id, str) or not re.fullmatch(
+            r"(?:[0-9]+|dev)", self.roku_app_id
+        ):
+            raise ValueError("invalid Roku player app ID")
+        if type(self.roku_seek_enabled) is not bool:
+            raise ValueError("roku_seek_enabled must be a boolean")
+        if self.roku_seek_enabled and self.roku_app_id == "782875":
+            raise ValueError(
+                "Stock Media Assistant does not support timestamp commands; install the Roomcast player first"
+            )
         networks = [ipaddress.IPv4Network(n) for n in self.discovery_networks]
         if sum(n.num_addresses for n in networks) > 1024 or any(
             not n.is_private for n in networks
