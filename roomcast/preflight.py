@@ -1,4 +1,4 @@
-"""Bounded, fail-closed media sampling; not a decode or visual playback proof."""
+"""Verify the selected presentation and the exact media bytes sent to the TV."""
 
 import asyncio
 import json
@@ -152,89 +152,124 @@ def video_evidence(streams, max_height):
     }
 
 
-async def decode_frame(data, executable):
-    """Require one actual decoded frame from relayed bytes, never contact a URL."""
-    with tempfile.TemporaryDirectory(prefix="roomcast-frame-") as directory:
-        source, dest = Path(directory) / "sample", Path(directory) / "frame.raw"
+async def decode_media(data, executable, required):
+    """Decode a complete segment, counting video frames and audio samples.
+
+    Frame hashes keep subprocess output bounded without retaining decoded media.
+    Black frames and silence are valid content, so neither is a rejection rule.
+    """
+    with tempfile.TemporaryDirectory(prefix="roomcast-decode-") as directory:
+        source = Path(directory) / "sample"
         source.write_bytes(data)
+        args = [
+            executable,
+            "-nostdin",
+            "-v",
+            "error",
+            "-xerror",
+            "-protocol_whitelist",
+            "file",
+            "-format_whitelist",
+            "mov,mpegts,aac,ac3,eac3,mp3",
+            "-threads",
+            "1",
+            "-copyts",
+            "-i",
+            str(source),
+        ]
+        for kind in required:
+            args += ["-map", "0:" + kind[0] + ":0"]
+        if "video" in required:
+            args += ["-vf", "scale=64:64", "-pix_fmt", "yuv420p"]
+        if "audio" in required:
+            args += ["-ac", "2", "-ar", "48000"]
+        args += ["-threads", "1", "-filter_threads", "1", "-f", "framehash", "-"]
         try:
             process = await asyncio.create_subprocess_exec(
-                executable,
-                "-nostdin",
-                "-v",
-                "error",
-                "-xerror",
-                "-protocol_whitelist",
-                "file",
-                "-format_whitelist",
-                "mov,mpegts,aac,ac3,eac3,mp3",
-                "-threads",
-                "1",
-                "-i",
-                str(source),
-                "-map",
-                "0:v:0",
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale=64:64",
-                "-pix_fmt",
-                "gray",
-                "-threads",
-                "1",
-                "-f",
-                "rawvideo",
-                "-fs",
-                "4096",
-                str(dest),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
             )
         except OSError:
-            raise ValueError("frame decoder unavailable") from None
+            raise ValueError("media decoder unavailable") from None
         try:
-            await asyncio.wait_for(process.wait(), PROBE_TIMEOUT)
-            if process.returncode or not dest.exists() or dest.stat().st_size != 4096:
-                raise ValueError("relayed video frame decode failed")
+            async with asyncio.timeout(20):
+                output = bytearray()
+                while chunk := await process.stdout.read(8192):
+                    output.extend(chunk)
+                    if len(output) > 1024 * 1024:
+                        raise ValueError("decoded segment exceeds limit")
+                await process.wait()
+            if process.returncode:
+                raise ValueError("media segment decode failed")
+            tracks, timebases = {}, {}
+            for line in output.decode().splitlines():
+                if line.startswith("#tb "):
+                    index, scale = line[4:].split(": ", 1)
+                    timebases[int(index)] = Fraction(scale)
+                elif line and not line.startswith("#"):
+                    fields = [field.strip() for field in line.split(",")]
+                    index, pts, duration, size = (int(fields[i]) for i in (0, 2, 3, 4))
+                    if size <= 0:
+                        continue
+                    start = float(pts * timebases[index])
+                    end = float((pts + duration) * timebases[index])
+                    track = tracks.setdefault(
+                        index, {"frames": 0, "start": start, "end": end}
+                    )
+                    track["frames"] += 1
+                    track["end"] = max(track["end"], end)
+            if set(tracks) != set(range(len(required))):
+                raise ValueError("media decode is missing a required track")
+            return {kind: tracks[i] for i, kind in enumerate(required)}
         except TimeoutError:
-            raise ValueError("relayed video frame decode timed out") from None
+            raise ValueError("media segment decode timed out") from None
         finally:
             if process.returncode is None:
                 process.kill()
             await process.wait()
 
 
-async def sample(session, url, *, video=False):
-    key = session.register(url)
+async def inspect_media(data, config, role, duration):
+    streams = await probe(data, config.ffprobe)
+    required = ("video", "audio") if role == "muxed" else (role,)
+    evidence = {}
+    if "video" in required:
+        evidence["video"] = video_evidence(streams, config.max_height)
+    if "audio" in required:
+        evidence["audio"] = audio_evidence(streams)
+    decoded = await decode_media(data, config.ffmpeg, required)
+    for kind, track in decoded.items():
+        span = track["end"] - track["start"]
+        if span < duration - 0.35 or span > duration + 1:
+            raise ValueError(f"{kind} duration does not match its HLS segment")
+    if (
+        role == "muxed"
+        and abs(decoded["video"]["start"] - decoded["audio"]["start"]) > 0.5
+    ):
+        raise ValueError("audio and video timestamps do not align")
+    return {**evidence, "decoded": decoded}
+
+
+async def sample(session, url, role):
     body, final = await session.raw(url)
-    if len(body) > 1024 * 1024:
-        raise ValueError("playlist exceeds preflight limit")
-    if b"#EXT-X-STREAM-INF:" in body:
-        raise ValueError("nested HLS masters are not supported")
+    if len(body) > 1024 * 1024 or b"#EXT-X-STREAM-INF:" in body:
+        raise ValueError("invalid or nested media playlist")
+    session.roles[final] = role
     _, segments = session.rewrite(body, final)
     if not segments:
         raise ValueError("playlist has no media segments")
-    resource = session.resources[segments[0]]
-    data, _ = await session.raw(resource.url)
-    if resource.init:
-        init, _ = await session.raw(resource.init)
-        data = init + data
-    streams = await probe(data, session.config.ffprobe)
-    if video:
-        video_evidence(streams, session.config.max_height)
-    else:
-        audio_evidence(streams)
-    # Validate the exact repackaged bytes, not just the upstream headers.
-    relayed, _ = await session.get(segments[0])
-    if resource.init:
-        streams = await probe(relayed, session.config.ffprobe)
-    if video:
-        video_evidence(streams, session.config.max_height)
-        await decode_frame(relayed, session.config.ffmpeg)
-    else:
-        audio_evidence(streams)
     session.pin_playlist(url, body, final)
-    return streams, key
+    # Consecutive startup segments plus distant samples catch late track changes.
+    indices = sorted(
+        {0, min(1, len(segments) - 1), len(segments) // 2, len(segments) - 1}
+    )
+    for index in indices:
+        await session.get(segments[index])
+    evidence = session.evidence[segments[0]]
+    return (
+        evidence,
+        sum(session.resources[key].duration for key in segments),
+        len(indices),
+    )
 
 
 async def prepare(session):
@@ -245,15 +280,14 @@ async def prepare(session):
     except asyncio.CancelledError:
         session.preflight = {"state": "cancelled", "visual_verified": False}
         raise
-    except Exception:
+    except Exception as error:
+        reason = str(error) if isinstance(error, ValueError) else type(error).__name__
         session.preflight = {
             "state": "failed",
             "visual_verified": False,
-            "reason": "no complete compatible presentation verified",
+            "reason": reason[:400],
         }
-        raise ValueError(
-            "media preflight failed: no complete compatible presentation verified"
-        ) from None
+        raise ValueError("media preflight failed: " + reason[:400]) from None
 
 
 async def _prepare(session):
@@ -262,9 +296,11 @@ async def _prepare(session):
     if len(body) > 1024 * 1024:
         raise ValueError("playlist exceeds preflight limit")
     lines = body.decode("utf-8-sig").splitlines()
-    # Validate playlist restrictions before considering any rendition.
     variants = []
+    renditions = []
     for index, line in enumerate(lines):
+        if line.startswith("#EXT-X-MEDIA:"):
+            renditions.append((index, attributes(line)))
         if line.startswith("#EXT-X-STREAM-INF:"):
             attrs = attributes(line)
             match = re.fullmatch(r"(\d+)x(\d+)", value(attrs, "RESOLUTION"))
@@ -277,71 +313,111 @@ async def _prepare(session):
                 raise ValueError("invalid variant URI")
             variants.append((rank, index, attrs))
     if not variants:
-        streams, _ = await sample(session, source, video=True)
-        video, audio = (
-            video_evidence(streams, session.config.max_height),
-            audio_evidence(streams),
-        )
-        external = False
-        attempted = 1
+        evidence, duration, count = await sample(session, source, "muxed")
+        audio, video = evidence["audio"], evidence["video"]
+        external, attempted = False, 1
     else:
         if len(variants) > MAX_VARIANTS:
             raise ValueError("master variant limit exceeded")
-        # A provisional choice allows syntax/URL validation, never playback.
-        session.selections[base] = variants[0][1]
-        session.rewrite(body, base)
+        failures = []
         for attempted, (_, index, attrs) in enumerate(
-            sorted(variants, key=lambda v: v[0], reverse=True), 1
+            sorted(variants, reverse=True), 1
         ):
-            try:
-                streams, _ = await sample(
-                    session, urljoin(base, lines[index + 1]), video=True
-                )
-                video = video_evidence(streams, session.config.max_height)
-                group = value(attrs, "AUDIO")
-                renditions = [
-                    (i, attributes(line))
-                    for i, line in enumerate(lines)
-                    if line.startswith("#EXT-X-MEDIA:")
+            group = value(attrs, "AUDIO")
+            tracks = (
+                [
+                    (i, a)
+                    for i, a in renditions
+                    if value(a, "TYPE") == "AUDIO" and value(a, "GROUP-ID") == group
                 ]
-                renditions = (
-                    [
-                        (i, a)
-                        for i, a in renditions
-                        if value(a, "TYPE") == "AUDIO" and value(a, "GROUP-ID") == group
-                    ]
-                    if group
-                    else []
-                )
-                if group and not renditions:
-                    raise ValueError("missing audio group")
-                audio, external = [], False
-                for _, rendition in renditions:
-                    uri = value(rendition, "URI")
-                    audio_streams = (
-                        (await sample(session, urljoin(base, uri)))[0]
-                        if uri
-                        else streams
-                    )
-                    audio.extend(audio_evidence(audio_streams))
-                    external = external or bool(uri)
-                if not renditions:
-                    audio = audio_evidence(streams)
-                session.selections[base] = index
-                break
-            except Exception:
+                if group
+                else []
+            )
+            if group and not tracks:
+                failures.append("missing audio group")
                 continue
+            # Select one usable default/autoselect track; unrelated languages must
+            # neither break playback nor reach the TV without verification.
+            tracks.sort(
+                key=lambda pair: (
+                    value(pair[1], "DEFAULT") != "YES",
+                    value(pair[1], "AUTOSELECT") != "YES",
+                )
+            )
+            for audio_index, rendition in tracks or [(None, {})]:
+                try:
+                    uri = value(rendition, "URI")
+                    session.selections[base] = index
+                    session.audio_selections[base] = audio_index
+                    session.rewrite(body, base)
+                    external = bool(uri)
+                    evidence, duration, count = await sample(
+                        session,
+                        urljoin(base, lines[index + 1]),
+                        "video" if external else "muxed",
+                    )
+                    video = evidence["video"]
+                    if external:
+                        sound, audio_duration, audio_count = await sample(
+                            session, urljoin(base, uri), "audio"
+                        )
+                        if abs(duration - audio_duration) > 1:
+                            raise ValueError(
+                                "audio and video playlists have different durations"
+                            )
+                        if (
+                            abs(
+                                evidence["decoded"]["video"]["start"]
+                                - sound["decoded"]["audio"]["start"]
+                            )
+                            > 0.5
+                        ):
+                            raise ValueError(
+                                "external audio and video timestamps do not align"
+                            )
+                        audio = sound["audio"]
+                        count += audio_count
+                    else:
+                        audio = evidence["audio"]
+                    break
+                except Exception as error:
+                    failures.append(
+                        str(error)
+                        if isinstance(error, ValueError)
+                        else type(error).__name__
+                    )
+            else:
+                continue
+            break
         else:
-            raise ValueError("no compatible master variant")
+            raise ValueError(
+                "no complete compatible variant: "
+                + "; ".join(dict.fromkeys(failures))[:300]
+            )
     session.preflight = {
         "state": "compatible",
-        "method": "ffprobe_and_first_frame",
-        "local_frame_decoded": True,
+        "method": "segment_audio_video_decode",
         "video": video,
         "audio": audio,
         "external_audio": external,
+        "segments_sampled": count,
+        "duration_seconds": round(duration, 3),
         "variants_attempted": attempted,
         "visual_verified": False,
     }
+    if variants:
+        # Provider CODECS/RESOLUTION tags can contradict the decoded media (for
+        # example advertising AVC level 5.0 for actual level 4.0). Roku may reject
+        # those headers before fetching a single segment. CODECS is optional;
+        # let the demuxer identify it and publish the measured dimensions.
+        attrs = attributes(lines[index])
+        attrs.pop("CODECS", None)
+        attrs.pop("DEFAULT", None)
+        attrs["RESOLUTION"] = f"{video['width']}x{video['height']}"
+        attrs["FRAME-RATE"] = str(video["fps"])
+        lines[index] = "#EXT-X-STREAM-INF:" + ",".join(
+            f"{k}={v}" for k, v in attrs.items()
+        )
+        body = ("\n".join(lines) + "\n").encode()
     session.pin_playlist(source, body, base)
     await session.get(session.root)

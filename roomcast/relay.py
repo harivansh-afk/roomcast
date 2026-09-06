@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import math
 import re
 import secrets
 import tempfile
@@ -16,6 +17,8 @@ from .fetch import validate_url
 class Resource:
     url: str
     init: str | None = None
+    role: str | None = None
+    duration: float = 0
 
 
 class Session:
@@ -41,6 +44,11 @@ class Session:
             "fetch_seconds": 0.0,
         }
         self.selections = {}
+        self.audio_selections = {}
+        self.roles = {}
+        self.evidence = {}
+        self.delivered = set()
+        self.failure = None
         self.playlists = {}
         self.preflight = {"state": "unchecked", "visual_verified": False}
         self.root = self.register(source)
@@ -56,14 +64,16 @@ class Session:
         finally:
             self.tasks.discard(task)
 
-    def register(self, url, init=None):
+    def register(self, url, init=None, role=None, duration=0):
         validate_url(url, self.config.allowed_hosts)
         if init:
             validate_url(init, self.config.allowed_hosts)
-        key = hashlib.sha256((url + "\0" + (init or "")).encode()).hexdigest()[:24]
+        key = hashlib.sha256(repr((url, init, role, duration)).encode()).hexdigest()[
+            :24
+        ]
         if len(self.resources) >= 10000 and key not in self.resources:
             raise ValueError("playlist resource limit exceeded")
-        self.resources[key] = Resource(url, init)
+        self.resources[key] = Resource(url, init, role, duration)
         return key
 
     def link(self, key):
@@ -132,7 +142,8 @@ class Session:
             from .preflight import attributes, value
 
             audio_group = value(attributes(lines[chosen]), "AUDIO")
-        init = None
+        init, duration = None, None
+        role = self.roles.get(base)
         output, segments = [], []
         for index, line in enumerate(lines):
             if index in skipped or index - 1 in skipped:
@@ -142,6 +153,7 @@ class Session:
                 if (
                     value(attrs, "TYPE") != "AUDIO"
                     or value(attrs, "GROUP-ID") != audio_group
+                    or index != self.audio_selections.get(base)
                 ):
                     continue
             if line.startswith("#EXT-X-I-FRAME-STREAM-INF:"):
@@ -152,9 +164,20 @@ class Session:
                     raise ValueError("invalid initialization segment")
                 init = urljoin(base, match[1])
                 validate_url(init, self.config.allowed_hosts)
+                if role != "muxed":
+                    output.append(
+                        '#EXT-X-MAP:URI="' + self.link(self.register(init)) + '"'
+                    )
                 continue
+            if line.startswith("#EXTINF:"):
+                duration = float(line.split(":", 1)[1].split(",", 1)[0])
+                if not math.isfinite(duration) or not 0 < duration <= 30:
+                    raise ValueError("HLS segment duration must be within 30 seconds")
             if line and not line.startswith("#"):
-                key = self.register(urljoin(base, line), init)
+                if not variants and duration is None:
+                    raise ValueError("media segment has no duration")
+                key = self.register(urljoin(base, line), init, role, duration or 0)
+                duration = None
                 output.append(self.link(key))
                 if not variants:
                     segments.append(key)
@@ -169,6 +192,10 @@ class Session:
 
                 output.append(re.sub(r'URI="([^"]+)"', replace, line))
             else:
+                if line.startswith("#EXT-X-STREAM-INF:"):
+                    line = re.sub(
+                        r',?(?:SUBTITLES|CLOSED-CAPTIONS)=("[^"]*"|[^,]*)', "", line
+                    )
                 output.append(line)
         return ("\n".join(output) + "\n").encode(), segments
 
@@ -224,7 +251,7 @@ class Session:
                 if (
                     process.returncode
                     or not dest.exists()
-                    or dest.stat().st_size > 40 * 1024 * 1024
+                    or not 0 < dest.stat().st_size < 40 * 1024 * 1024
                 ):
                     raise ValueError("segment repackaging failed")
                 result = dest.read_bytes()
@@ -243,11 +270,32 @@ class Session:
                     task = asyncio.create_task(self._prefetch(upcoming))
                     self.tasks.add(task)
                     task.add_done_callback(self.tasks.discard)
-            elif resource.init:
-                init, _ = await self.raw(resource.init)
-                result = await self.remux(data, init), "video/mp2t"
             else:
-                result = data, "application/octet-stream"
+                init = b""
+                if resource.init:
+                    init, init_final = await self.raw(resource.init)
+                    self.pin_playlist(resource.init, init, init_final)
+                if resource.role == "muxed" and init:
+                    data = await self.remux(data, init)
+                    init = b""
+                if resource.role:
+                    from .preflight import inspect_media
+
+                    evidence = await inspect_media(
+                        init + data, self.config, resource.role, resource.duration
+                    )
+                    self.evidence[key] = evidence
+                    self.metrics["segments_verified"] = (
+                        self.metrics.get("segments_verified", 0) + 1
+                    )
+                content_type = (
+                    ("audio/mp4" if resource.role == "audio" else "video/mp4")
+                    if init
+                    else "video/mp2t"
+                    if resource.role
+                    else "application/octet-stream"
+                )
+                result = data, content_type
             self.put(key, result)
             return result
 
@@ -280,5 +328,8 @@ class Session:
         await asyncio.gather(*tasks, return_exceptions=True)
         self.playlists.clear()
         self.selections.clear()
+        self.audio_selections.clear()
+        self.evidence.clear()
+        self.roles.clear()
         self.cache.clear()
         self.cache_size = 0
