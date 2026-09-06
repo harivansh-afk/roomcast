@@ -45,7 +45,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_stop_cancels_resolution_before_any_late_launch(self):
         gate = asyncio.Event()
 
-        async def resolve(*args):
+        async def resolve(*args, **kwargs):
             gate.set()
             await asyncio.Event().wait()
             yield  # This resolver never produces a source before cancellation.
@@ -83,7 +83,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.service.roku.status = delayed_status
 
-        async def resolving(*args):
+        async def resolving(*args, **kwargs):
             await asyncio.Event().wait()
             yield  # This resolver never produces a source before cancellation.
 
@@ -119,7 +119,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         visited = []
         closed = asyncio.Event()
 
-        async def sources(*args):
+        async def sources(*args, **kwargs):
             try:
                 for provider in ("Unavailable", "Replacement", "Unused"):
                     visited.append(provider)
@@ -146,7 +146,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.roku.launch.assert_awaited_once()
 
     async def test_all_failed_providers_report_failure_without_launch(self):
-        async def sources(*args):
+        async def sources(*args, **kwargs):
             for provider in ("One", "Two"):
                 yield {
                     "title": "test",
@@ -162,3 +162,23 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.job_state["state"], "failed")
         self.assertIsNone(self.service.session)
         self.service.roku.launch.assert_not_awaited()
+
+    async def test_youtube_uses_native_launch_and_verifies_youtube_player(self):
+        self.service.roku.launch_youtube = AsyncMock()
+        self.service.roku.confirm = AsyncMock()
+        self.service.resolver.resolve = AsyncMock()
+        await self.service.play({"kind": "youtube", "id": "aqz-KE-bpKQ"})
+        self.service.roku.launch_youtube.assert_awaited_once_with("aqz-KE-bpKQ")
+        self.service.roku.confirm.assert_awaited_once_with(app_id="837")
+        self.service.resolver.resolve.assert_not_called()
+        self.assertEqual(self.service.job_state["state"], "playing")
+
+    async def test_lan_media_denies_another_device_even_with_correct_token(self):
+        from types import SimpleNamespace
+
+        session = Session(AsyncMock(), config(), BASE + "main.m3u8", {}, "test")
+        session.put(session.root, (b"video", "video/mp2t"))
+        self.service.session = session
+        self.service.network = SimpleNamespace(address="10.0.0.2")
+        response = await self.client.get(f"/media/{session.token}/{session.root}")
+        self.assertEqual(response.status, 404)

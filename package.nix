@@ -23,6 +23,7 @@ python3Packages.buildPythonApplication {
   dependencies = with python3Packages; [
     aiohttp
     playwright
+    pyytlounge
     mcp
   ];
   pythonImportsCheck = [

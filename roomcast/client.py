@@ -9,7 +9,7 @@ import aiohttp
 Command = Literal[
     "stop", "pause", "resume", "home", "volume_up", "volume_down", "mute", "power_on"
 ]
-Kind = Literal["tv", "movie"]
+Kind = Literal["tv", "movie", "youtube", "browser"]
 
 
 def default_socket():

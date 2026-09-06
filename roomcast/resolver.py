@@ -4,7 +4,7 @@ import asyncio
 import ipaddress
 import re
 import socket
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
@@ -70,16 +70,15 @@ class Resolver:
         await context.route("**/*", route)
         return context
 
-    async def search(self, query):
+    async def search(self, query, origin=None):
+        origin = origin or self.config.site_url
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 120:
             raise ValueError("query must be 1–120 characters")
         async with self.lock, asyncio.timeout(45):
             context = await self.context()
             try:
                 page = await context.new_page()
-                await page.goto(
-                    self.config.site_url + "/", wait_until="domcontentloaded"
-                )
+                await page.goto(origin + "/", wait_until="domcontentloaded")
                 await page.get_by_role("button", name="Search", exact=True).click()
                 field = page.locator(
                     'input[type="search"], input[placeholder*="Search" i]'
@@ -110,8 +109,43 @@ class Resolver:
             finally:
                 await context.close()
 
-    async def resolve(self, kind, content_id, season=1, episode=1):
+    async def search_youtube(self, query):
+        if not isinstance(query, str) or not 1 <= len(query.strip()) <= 120:
+            raise ValueError("query must be 1–120 characters")
+        async with self.lock, asyncio.timeout(45):
+            context = await self.context()
+            try:
+                page = await context.new_page()
+                await page.goto(
+                    "https://www.youtube.com/results?"
+                    + urlencode({"search_query": query}),
+                    wait_until="domcontentloaded",
+                )
+                links = page.locator("a#video-title")
+                await links.first.wait_for()
+                rows = await links.evaluate_all(
+                    "els => els.map(e => ({title:e.textContent.trim(),url:e.href}))"
+                )
+                results = []
+                seen = set()
+                for row in rows:
+                    match = re.search(r"[?&]v=([A-Za-z0-9_-]{11})(?:&|$)", row["url"])
+                    if match and match[1] not in seen:
+                        seen.add(match[1])
+                        results.append(
+                            {
+                                "kind": "youtube",
+                                "id": match[1],
+                                "title": row["title"][:180],
+                            }
+                        )
+                return results[:10]
+            finally:
+                await context.close()
+
+    async def resolve(self, kind, content_id, season=1, episode=1, origin=None):
         """Yield fresh candidates lazily, advancing servers only after consumer failure."""
+        origin = origin or self.config.site_url
         path = (
             f"/watch/tv/{content_id}/{season}/{episode}"
             if kind == "tv"
@@ -141,9 +175,7 @@ class Resolver:
                             candidates.append(url)
 
                 page.on("response", observe)
-                await page.goto(
-                    self.config.site_url + path, wait_until="domcontentloaded"
-                )
+                await page.goto(origin + path, wait_until="domcontentloaded")
                 await page.get_by_role("button", name="Servers", exact=True).click()
                 rows = page.locator("button.src-row")
                 await rows.first.wait_for()
@@ -154,8 +186,8 @@ class Resolver:
                 if kind == "tv":
                     title += f" — S{season:02d}E{episode:02d}"
                 headers = {
-                    "Referer": self.config.site_url + "/",
-                    "Origin": self.config.site_url,
+                    "Referer": origin + "/",
+                    "Origin": origin,
                     "User-Agent": await page.evaluate("navigator.userAgent"),
                 }
                 for index, provider in enumerate(providers):

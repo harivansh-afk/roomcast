@@ -3,17 +3,22 @@ import asyncio
 import logging
 import os
 import re
+import socket as sockets
 import time
 from contextlib import aclosing
 from pathlib import Path
 
 from aiohttp import web
 
+from .browser import Browser
 from .config import Config
+from .directory import Directory
 from .fetch import Fetcher
+from .network import Network
 from .relay import Session
 from .resolver import Resolver
 from .roku import Roku
+from .youtube import YouTube
 
 
 @web.middleware
@@ -34,9 +39,13 @@ async def errors(request, handler):
 class Service:
     def __init__(self, config):
         self.config = config
+        self.youtube = YouTube(config.youtube_auth)
+        self.directory = Directory(config.directory_url, config.directory_cache)
         self.fetcher = Fetcher(config.allowed_hosts)
         self.roku = Roku(config.roku_ip, config.roku_serial)
+        self.network = Network(config, self.roku) if config.lan_interface else None
         self.resolver = Resolver(config)
+        self.browser = Browser(self.resolver)
         self.session = None
         self.control_lock = asyncio.Lock()
         self.job = None
@@ -63,9 +72,31 @@ class Service:
         candidate = None
         failures = []
         try:
-            sources = self.resolver.resolve(
-                body["kind"], body["id"], body.get("season", 1), body.get("episode", 1)
-            )
+            if body["kind"] == "youtube":
+                if self.session:
+                    await self.session.close()
+                    self.session = None
+                self.job_state["state"] = "launching"
+                await self.roku.launch_youtube(body["id"])
+                self.job_state["state"] = "verifying"
+                await self.roku.confirm(app_id="837")
+                self.job_state.update(
+                    state="playing",
+                    provider="YouTube",
+                    startup_seconds=round(time.monotonic() - started, 3),
+                )
+                return
+            if body["kind"] == "browser":
+                sources = self.browser.selected(body["id"])
+            else:
+                origin = await self.site(body.get("source", "cinejoy"))
+                sources = self.resolver.resolve(
+                    body["kind"],
+                    body["id"],
+                    body.get("season", 1),
+                    body.get("episode", 1),
+                    origin=origin,
+                )
             async with aclosing(sources):
                 async for resolved in sources:
                     self.job_state.update(
@@ -140,11 +171,22 @@ class Service:
             "season",
             "episode",
             "replace",
+            "source",
         }:
             raise ValueError("expected kind, id, season, episode, replace")
         if self.job and not self.job.done():
             raise web.HTTPConflict(text="a playback request is already running")
-        if (
+        if body.get("kind") == "browser":
+            if not isinstance(body.get("id"), str) or not re.fullmatch(
+                r"[a-f0-9]{16}", body["id"]
+            ):
+                raise ValueError("invalid captured stream ID")
+        elif body.get("kind") == "youtube":
+            if not isinstance(body.get("id"), str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{11}", body["id"]
+            ):
+                raise ValueError("invalid YouTube video ID")
+        elif (
             body.get("kind") not in ("tv", "movie")
             or type(body.get("id")) is not int
             or not 0 < body["id"] < 100000000
@@ -157,6 +199,11 @@ class Service:
             raise ValueError("invalid season or episode")
         if type(body.get("replace", False)) is not bool:
             raise ValueError("replace must be a boolean")
+        if self.network:
+            await self.network.ensure()
+            self.config.public_base = (
+                f"http://{self.network.local_address}:{self.config.lan_port}"
+            )
         current = await self.roku.status()
         if current["state"] == "play" and body.get("replace") is not True:
             raise web.HTTPConflict(text="TV is playing; explicit replace=true required")
@@ -165,6 +212,8 @@ class Service:
         return web.json_response(self.job_state, status=202)
 
     async def status(self, request):
+        if self.network:
+            await self.network.ensure()
         result = {"job": self.job_state, "roku": await self.roku.status()}
         if self.session:
             result["relay"] = {
@@ -173,14 +222,95 @@ class Service:
             }
         return web.json_response(result)
 
+    async def browse(self, request):
+        async with self.control_lock:
+            if self.job and not self.job.done():
+                raise web.HTTPConflict(
+                    text="wait for playback or stop the pending request"
+                )
+            return await self._browse(request)
+
+    async def _browse(self, request):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) - {
+            "source",
+            "action",
+            "element",
+            "text",
+        }:
+            raise ValueError("expected source, action, element and text")
+        origin = await self.site(body.get("source", "cinejoy"))
+        return web.json_response(
+            await self.browser.act(
+                origin,
+                body.get("action", "inspect"),
+                body.get("element"),
+                body.get("text"),
+            )
+        )
+
+    async def sources(self, request):
+        return web.json_response(await self.directory.list())
+
+    async def site(self, source):
+        if source == "cinejoy":
+            return self.config.site_url
+        for item in await self.directory.list():
+            if source == item["id"]:
+                return item["url"].rstrip("/")
+        raise ValueError("unknown source; choose an ID returned by sources")
+
     async def search(self, request):
-        return web.json_response(await self.resolver.search(request.query.get("q", "")))
+        source = request.query.get("source", "cinejoy")
+        query = request.query.get("q", "")
+        if source == "youtube":
+            return web.json_response(await self.resolver.search_youtube(query))
+        origin = await self.site(source)
+        results = await self.resolver.search(query, origin=origin)
+        return web.json_response([{**item, "source": source} for item in results])
+
+    async def seek(self, request):
+        async with self.control_lock:
+            if self.job and not self.job.done():
+                raise web.HTTPConflict(text="wait for playback before seeking")
+            if self.network:
+                await self.network.ensure()
+            body = await request.json()
+            if not isinstance(body, dict) or set(body) != {"seconds"}:
+                raise ValueError("expected seconds")
+            seconds = body["seconds"]
+            if type(seconds) is not int or not 1 <= abs(seconds) <= 3600:
+                raise ValueError("seconds must be a nonzero integer within one hour")
+            before = await self.roku.status()
+            if before["app_id"] != "837":
+                raise ValueError("Precise seeking currently requires YouTube")
+            target = max(0, before["position_ms"] / 1000 + seconds)
+            await self.youtube.seek(target)
+            for _ in range(5):
+                await asyncio.sleep(1)
+                after = await self.roku.status()
+                if after["app_id"] != "837":
+                    raise ValueError("TV app changed during seek")
+                if abs(after["position_ms"] / 1000 - target) < 6:
+                    return web.json_response(
+                        {"confirmed": True, "target_seconds": target, "roku": after}
+                    )
+            raise ValueError(
+                "YouTube seek was sent but the TV did not confirm the target position"
+            )
+
+    async def pair_youtube(self, request):
+        async with self.control_lock:
+            body = await request.json()
+            return web.json_response(await self.youtube.pair(body.get("code")))
 
     async def command(self, request):
         async with self.control_lock:
             return await self._command(request)
 
     async def _command(self, request):
+        if self.network:
+            await self.network.ensure()
         command = request.match_info["command"]
         if command not in self.roku.commands:
             raise ValueError("unsupported command")
@@ -191,12 +321,15 @@ class Service:
             if self.session:
                 await self.session.close()
                 self.session = None
+            await self.browser.close()
             self.job_state = {"state": "stopped"}
         elif self.job and not self.job.done():
             raise web.HTTPConflict(text="wait for playback or stop the pending request")
         return web.json_response(await self.roku.command(command))
 
     async def media(self, request):
+        if self.network and request.remote != self.network.address:
+            raise web.HTTPNotFound()
         session = self.session
         if (
             session is None
@@ -233,9 +366,12 @@ class Service:
             await asyncio.gather(self.job, return_exceptions=True)
         if self.session:
             await self.session.close()
+        await self.browser.close()
         await self.resolver.close()
         await self.roku.close()
         await self.fetcher.close()
+        await self.directory.close()
+        await self.youtube.close()
 
 
 async def serve(config):
@@ -245,7 +381,11 @@ async def serve(config):
         [
             web.get("/status", service.status),
             web.get("/search", service.search),
+            web.get("/sources", service.sources),
+            web.post("/browse", service.browse),
             web.post("/play", service.start_play),
+            web.post("/seek", service.seek),
+            web.post("/youtube/pair", service.pair_youtube),
             web.post("/command/{command}", service.command),
         ]
     )
@@ -263,9 +403,20 @@ async def serve(config):
             await runner.setup()
         await web.UnixSite(runners[0], str(socket)).start()
         os.chmod(socket, 0o660)
-        await web.TCPSite(runners[1], config.media_host, config.media_port).start()
+        if config.lan_interface:
+            if (
+                os.environ.get("LISTEN_PID") != str(os.getpid())
+                or os.environ.get("LISTEN_FDS") != "1"
+            ):
+                raise ValueError("LAN mode requires the systemd media socket")
+            listener = sockets.socket(fileno=3)
+            await web.SockSite(runners[1], listener).start()
+        else:
+            await web.TCPSite(runners[1], config.media_host, config.media_port).start()
         logging.info(
-            "roomcast ready; control=%s media=loopback:%s", socket, config.media_port
+            "roomcast ready; control=%s media=%s",
+            socket,
+            "LAN socket" if config.lan_interface else f"loopback:{config.media_port}",
         )
         await asyncio.Event().wait()
     finally:
