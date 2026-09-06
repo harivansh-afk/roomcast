@@ -274,6 +274,83 @@ class SubtitleServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.roku.subtitles.assert_not_awaited()
         self.service.roku.status.assert_not_awaited()
 
+    async def test_sidecar_labels_are_unique_and_stable_between_launch_and_control(
+        self,
+    ):
+        session = self.service.session
+        session.subtitle_tracks = [
+            english(),
+            track(BASE + "other.srt", "English", "en", "file", [HOST]),
+        ]
+        selected = session.subtitle_tracks[1]
+        launch = self.service.subtitle_params(session, True, selected, launching=True)
+        control = self.service.subtitle_params(session, True, selected)
+        tracks = json.loads(launch["subtitleTracks"])
+        self.assertNotEqual(tracks[0]["Description"], tracks[1]["Description"])
+        self.assertEqual(control["subtitleName"], tracks[1]["Description"])
+        self.assertEqual(control["subtitleUrl"], tracks[1]["TrackName"])
+        self.assertEqual(control["subtitleId"], selected["id"])
+
+    async def test_pending_native_state_waits_for_selection_to_finish(self):
+        pending = asyncio.Event()
+        params_sent = None
+
+        async def apply(params):
+            nonlocal params_sent
+            params_sent = params
+            response = await self.report(params, applied=False, available=False)
+            self.assertEqual(response.status, 204)
+            pending.set()
+
+        self.service.roku.subtitles.side_effect = apply
+        request = asyncio.create_task(
+            self.client.post("/subtitles", json={"enabled": True})
+        )
+        try:
+            await asyncio.wait_for(pending.wait(), 1)
+            # Wait until the service consumes the pending event.
+            async with asyncio.timeout(1):
+                while self.service.session.subtitle_event.is_set():
+                    await asyncio.sleep(0)
+            self.assertFalse(request.done())
+            self.service.roku.status.assert_awaited_once()
+            response = await self.report(params_sent, sequence=2)
+            self.assertEqual(response.status, 204)
+            response = await asyncio.wait_for(request, 1)
+            self.assertEqual(response.status, 200, await response.text())
+            self.assertTrue((await response.json())["confirmed"])
+        finally:
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+
+    async def test_pending_state_alone_never_confirms_a_change(self):
+        async def apply(params):
+            await self.report(params, applied=False)
+
+        self.service.roku.subtitles.side_effect = apply
+        self.service.session.subtitle_event.wait = AsyncMock(
+            side_effect=[True, TimeoutError]
+        )
+        response = await self.client.post("/subtitles", json={"enabled": True})
+        self.assertEqual(response.status, 400)
+        self.assertIn("not confirmed", await response.text())
+        self.assertFalse(self.service.session.subtitle_report["applied"])
+
+    async def test_remote_change_during_final_status_check_is_not_confirmed(self):
+        async def apply(params):
+            await self.report(params)
+
+            async def after():
+                await self.report(params, applied=False, caption_mode="Off", sequence=2)
+                return playback()
+
+            self.service.roku.status.side_effect = after
+
+        self.service.roku.subtitles.side_effect = apply
+        response = await self.client.post("/subtitles", json={"enabled": True})
+        self.assertEqual(response.status, 400)
+        self.assertIn("changed during confirmation", await response.text())
+
     async def test_unsupported_player_rejected_without_device_io(self):
         self.service.config.roku_subtitle_control = False
         response = await self.client.post("/subtitles", json={"enabled": True})
