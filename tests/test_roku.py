@@ -39,10 +39,14 @@ class RokuTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         app.router.add_route("*", "/{path:.*}", handler)
         async with TestServer(app) as server:
-            roku = Roku("10.0.0.2", "ok")
+            roku = Roku("10.0.0.2", "ok", "dev")
             roku.base = str(server.make_url(""))
             try:
-                await roku.launch("http://10.0.0.1:18796/a?x=1&y=2", "Title")
+                await roku.launch(
+                    "http://10.0.0.1:18796/a?x=1&y=2", "Title", start_seconds=1200
+                )
+                self.assertTrue(paths[-1].startswith("/launch/dev?"))
+                self.assertIn("startSeconds=1200", paths[-1])
                 self.assertIn("u=http%3A%2F%2F", paths[-1])
                 self.assertIn("%26y%3D2", paths[-1])
             finally:

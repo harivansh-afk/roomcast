@@ -18,10 +18,12 @@
         in
         {
           default = pkgs.callPackage ./package.nix { };
+          roku-player = pkgs.callPackage ./roku/package.nix { };
         }
       );
       checks = each (system: {
         package = self.packages.${system}.default;
+        roku-player = self.packages.${system}.roku-player;
       });
       nixosModules.default = import ./module.nix;
     };

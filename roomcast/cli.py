@@ -2,12 +2,24 @@ import argparse
 import asyncio
 import getpass
 import json
+import re
 import sys
 from typing import get_args
 
 import aiohttp
 
 from .client import Command, Kind, call, default_socket
+
+
+def timestamp(value):
+    if not re.fullmatch(r"\d+(?::[0-5]\d){0,2}", value):
+        raise argparse.ArgumentTypeError("use seconds, MM:SS or HH:MM:SS")
+    result = 0
+    for part in value.split(":"):
+        result = result * 60 + int(part)
+    if result > 21600:
+        raise argparse.ArgumentTypeError("timestamp must be within six hours")
+    return result
 
 
 def main():
@@ -23,7 +35,10 @@ def main():
     search.add_argument("query")
     search.add_argument("--source", default="cinejoy")
     seek = sub.add_parser("seek")
-    seek.add_argument("seconds", type=int)
+    seek.add_argument("seconds", type=int, nargs="?")
+    seek.add_argument(
+        "--to", type=timestamp, help="absolute seconds, MM:SS or HH:MM:SS"
+    )
     play = sub.add_parser("play")
     play.add_argument("kind", choices=get_args(Kind))
     play.add_argument("id")
@@ -31,6 +46,7 @@ def main():
     play.add_argument("--episode", type=int, default=1)
     play.add_argument("--replace", action="store_true")
     play.add_argument("--source", default="cinejoy")
+    play.add_argument("--start", dest="start_seconds", type=timestamp, default=0)
     for action in get_args(Command):
         sub.add_parser(action)
     args = parser.parse_args()
@@ -45,12 +61,30 @@ def main():
             "/play",
             {
                 key: getattr(args, key)
-                for key in ("kind", "id", "season", "episode", "replace", "source")
+                for key in (
+                    "kind",
+                    "id",
+                    "season",
+                    "episode",
+                    "replace",
+                    "source",
+                    "start_seconds",
+                )
             },
             None,
         )
     elif args.action == "seek":
-        method, path, data, params = "POST", "/seek", {"seconds": args.seconds}, None
+        if (args.seconds is None) == (args.to is None):
+            parser.error("seek requires either relative seconds or --to TIMESTAMP")
+        method, path, data, params = (
+            "POST",
+            "/seek",
+            {
+                "seconds": args.seconds if args.to is None else args.to,
+                "mode": "relative" if args.to is None else "absolute",
+            },
+            None,
+        )
     elif args.action == "search":
         method, path, data, params = (
             "GET",
