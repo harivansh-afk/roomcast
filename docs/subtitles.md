@@ -9,7 +9,7 @@ no supported tracks reports that fact and continues video/audio playback.
 
 Build `nix build .#roku-player` and install `result/roomcast-player.zip` using the
 Roku development installer when viewing has finished. This version is Roomcast
-Player 1.3.4. Sideloading replaces the existing `dev` app. Configure the service:
+Player 1.3.5. Sideloading replaces the existing `dev` app. Configure the service:
 
 ```nix
 services.roomcast = {
@@ -27,7 +27,8 @@ disabled for stock Media Assistant or the older 1.3.2 player; neither implements
 this control protocol. No TV settings or service configuration are changed by
 building or merging this package.
 
-Use 1.3.4 for provider subtitle files. In 1.3.3, the subtitle JSON was parsed into
+Since 1.3.4, provider subtitle metadata uses case-insensitive parsing. In 1.3.3,
+the subtitle JSON was parsed into
 case-sensitive associative arrays. The TV's ContentNode stored the mixed-case
 `Language`, `Description`, and `TrackName` entries as empty fields, leaving its
 available-track list empty even with captions On. The player now uses Roku's
@@ -104,6 +105,18 @@ The player therefore reports native caption mode and track selection back to
 current TV address, session, command ID and matching track/preference are accepted.
 Per-command sequence numbers reject delayed reports from older settings.
 
+Player 1.3.5 resolves the native track identifier by exact URL first, then by a
+unique description. Provider files receive distinct numbered descriptions so
+two tracks named English remain distinguishable. Ambiguous descriptions are
+rejected. The native `currentSubtitleTrack` must match the resolved identifier;
+writing `subtitleTrack` alone is not confirmation.
+
+The player reports pending state immediately and checks selection every 250 ms
+for up to eight seconds, including while paused. Polling stops when applied or
+when that window expires; subsequent remote changes are reported without forcing
+the requested setting back on. The service waits through pending reports within
+the same eight-second deadline.
+
 `confirmed: true` means the player reported the requested track and caption mode.
 It does not prove that glyphs were visible at a particular frame or that a provider
 matched the dialogue correctly. Missing acknowledgement fails after eight seconds;
@@ -114,12 +127,26 @@ available tracks, player report, and any delivery error.
 Offline tests cover discovery, language/default selection, full-timeline SRT
 conversion, HLS timestamp maps, private URL rejection, malformed captions,
 stale/foreign acknowledgements, missing acknowledgement, cancellation and
-caption errors that leave audio/video running. The player is compiled with
-BrighterScript 0.73.1 and packaged through the Nix check.
+caption errors that leave audio/video running. Run the pure BrightScript track
+and state regression cases with:
+
+```sh
+npm exec --yes --package=brs@0.45.0 -- brs --root roku/tests \
+  roku/components/subtitleState.brs roku/tests/subtitle-state.brs
+```
+
+Successful execution prints `All subtitle state tests passed.` These cases use
+synthetic native field values; they do not emulate Roku's decoder or field events.
+Compile the packaged player with BrighterScript 0.73.1 as well as running the Nix
+package check.
 
 The first live 1.3.3 playback confirmed a 10-minute start with progressing audio
 and video, but exposed the empty subtitle metadata described above. Player 1.3.4
-passes package and compiler checks; its live subtitle acceptance is pending.
+subsequently displayed English captions with playback resumed at the saved position,
+but subtitle commands still timed out without native acknowledgement. The precise
+native field values at that timeout were not captured because debugger inspection
+would pause playback. Player 1.3.5 addresses track matching and delayed field updates;
+live acceptance of its confirmation path remains pending.
 After viewing has finished, install the updated player and verify visible English
 captions on a fresh episode,
 on/off and language changes during play and pause, the remote caption menu,

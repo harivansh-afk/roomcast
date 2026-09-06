@@ -438,12 +438,16 @@ class Service:
         }
         session.subtitle_report = None
         session.subtitle_event.clear()
+        file_tracks = [t for t in session.subtitle_tracks if t["kind"] == "file"]
+        file_names = {
+            t["id"]: f"{i + 1}. {t['name']}" for i, t in enumerate(file_tracks)
+        }
         params = {
             "subtitleRequest": session.subtitle_request["request"],
             "subtitlesEnabled": "true" if enabled else "false",
             "subtitleId": selected["id"] if selected else "",
-            "subtitleName": selected["name"]
-            if selected and selected["kind"] == "hls"
+            "subtitleName": file_names.get(selected["id"], selected["name"])
+            if selected
             else "",
             "subtitleUrl": session.link(
                 session.register(selected["url"], role="subtitle-file")
@@ -457,13 +461,12 @@ class Service:
                 [
                     {
                         "Language": roku_language(t["language"]),
-                        "Description": t["name"],
+                        "Description": file_names[t["id"]],
                         "TrackName": session.link(
                             session.register(t["url"], role="subtitle-file")
                         ),
                     }
-                    for t in session.subtitle_tracks
-                    if t["kind"] == "file"
+                    for t in file_tracks
                 ],
                 separators=(",", ":"),
             )
@@ -546,18 +549,20 @@ class Service:
                     )
                 params = self.subtitle_params(session, enabled, selected)
                 await self.roku.subtitles(params)
-                await asyncio.wait_for(session.subtitle_event.wait(), 8)
-                report = session.subtitle_report
-                if not report["applied"]:
-                    raise ValueError(
-                        "The Roku player could not apply the requested subtitle track"
-                    )
+                async with asyncio.timeout(8):
+                    while True:
+                        await session.subtitle_event.wait()
+                        session.subtitle_event.clear()
+                        if session.subtitle_report["applied"]:
+                            break
                 after = await self.roku.status()
                 if (
                     after["app_id"] != self.roku.app_id
                     or after.get("player_app_id") != self.roku.app_id
                 ):
                     raise ValueError("TV app changed during subtitle selection")
+                if not session.subtitle_report["applied"]:
+                    raise ValueError("Subtitle selection changed during confirmation")
                 session.subtitle_error = None
                 return {"confirmed": True, **self.subtitle_status()}
         except TimeoutError:
