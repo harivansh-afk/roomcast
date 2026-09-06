@@ -23,8 +23,8 @@ async def errors(request, handler):
         raise
     except (ValueError, KeyError) as error:
         return web.json_response({"error": str(error)}, status=400)
-    except Exception:
-        logging.error("request failed (%s)", type(__import__("sys").exc_info()[1]).__name__)
+    except Exception as error:
+        logging.error("request failed (%s)", type(error).__name__)
         return web.json_response({"error": "request failed; see service log"}, status=502)
 
 
@@ -35,6 +35,7 @@ class Service:
         self.roku = Roku(config.roku_ip, config.roku_serial)
         self.resolver = Resolver(config)
         self.session = None
+        self.control_lock = asyncio.Lock()
         self.job = None
         self.job_state = {"state": "idle"}
 
@@ -75,8 +76,8 @@ class Service:
                     await self.roku.confirm()
                     self.job_state.update(state="playing", startup_seconds=round(time.monotonic() - started, 3))
                     return
-                except (ValueError, OSError, asyncio.TimeoutError) as error:
-                    failures.append(str(error))
+                except Exception as error:
+                    failures.append(str(error) if isinstance(error, ValueError) else type(error).__name__)
                     await candidate.close()
                     if self.session is candidate:
                         self.session = None
@@ -91,6 +92,10 @@ class Service:
             self.job_state.update(state="failed", error=str(error)[:300] if isinstance(error, ValueError) else f"playback failed ({type(error).__name__})")
 
     async def start_play(self, request):
+        async with self.control_lock:
+            return await self._start_play(request)
+
+    async def _start_play(self, request):
         body = await request.json()
         if not isinstance(body, dict) or set(body) - {"kind", "id", "season", "episode", "replace"}:
             raise ValueError("expected kind, id, season, episode, replace")
@@ -115,6 +120,10 @@ class Service:
         return web.json_response(await self.resolver.search(request.query.get("q", "")))
 
     async def command(self, request):
+        async with self.control_lock:
+            return await self._command(request)
+
+    async def _command(self, request):
         command = request.match_info["command"]
         if command not in self.roku.commands:
             raise ValueError("unsupported command")

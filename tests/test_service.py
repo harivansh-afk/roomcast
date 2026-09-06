@@ -64,3 +64,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 206)
         self.assertEqual(await response.read(), b"2345")
         self.assertEqual(response.headers["Content-Range"], "bytes 2-5/10")
+
+    async def test_concurrent_play_has_one_winner(self):
+        async def delayed_status():
+            await asyncio.sleep(.02)
+            return {"state": "stop", "app_id": "782875"}
+        self.service.roku.status = delayed_status
+        async def resolving(*args):
+            await asyncio.Event().wait()
+        self.service.resolver.resolve = resolving
+        responses = await asyncio.gather(*[
+            self.client.post("/play", json={"kind": "tv", "id": 1}) for _ in range(2)])
+        self.assertEqual(sorted(r.status for r in responses), [202, 409])
