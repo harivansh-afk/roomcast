@@ -31,7 +31,10 @@ python3Packages.buildPythonApplication {
     "roomcast.server"
     "roomcast.cli"
   ];
-  nativeCheckInputs = [ ruff ffmpeg-headless ];
+  nativeCheckInputs = [
+    ruff
+    ffmpeg-headless
+  ];
   checkPhase = ''
     runHook preCheck
     ruff check roomcast tests
