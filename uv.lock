@@ -966,6 +966,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pyytlounge"
+version = "3.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/02/eb/c68020efcdb6873998f5ca6e050ebe4207c0f13670e7f77daf1371bf4ef1/pyytlounge-3.4.0.tar.gz", hash = "sha256:2a506cf4f9debb31a5d5663ed1c128c78af64542ded440512ed0225b648c548a", size = 31163, upload-time = "2026-08-11T15:48:21.888Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/c3/fb659765cfc568004fbe59050a2ed03461dcdc0cbbdbc11f09cf81d23aca/pyytlounge-3.4.0-py3-none-any.whl", hash = "sha256:d97332b36d2c0ba47d687541149de97a539b826d34e8378c4ad21f907f4c4e3a", size = 25490, upload-time = "2026-08-11T15:48:20.733Z" },
+]
+
+[[package]]
 name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -987,6 +999,7 @@ dependencies = [
     { name = "aiohttp" },
     { name = "mcp" },
     { name = "playwright" },
+    { name = "pyytlounge" },
 ]
 
 [package.dev-dependencies]
@@ -999,6 +1012,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.12,<4" },
     { name = "mcp", specifier = ">=1.20,<2" },
     { name = "playwright", specifier = ">=1.55,<2" },
+    { name = "pyytlounge", specifier = ">=3,<4" },
 ]
 
 [package.metadata.requires-dev]

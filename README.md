@@ -15,11 +15,14 @@ URLs can fail. No DRM handling or full video transcoding is implemented.
 ## Use
 
 Install Media Assistant (Roku app 782875), enable Control by mobile apps and Fast
-TV Start. Reserve the TV and relay addresses in DHCP. The service checks the TV's
-serial before every action; an address reassigned to another TV fails closed.
+TV Start. Pair the TV by serial number. Addresses are discovered at runtime; DHCP
+reservations are not required.
 
 ```sh
 roomcast search 'The Gentlemen'
+roomcast search 'Daft Punk official audio' --source youtube
+roomcast play youtube aqz-KE-bpKQ
+roomcast sources
 roomcast play tv 236235 --season 1 --episode 1
 roomcast status
 roomcast pause
@@ -33,8 +36,8 @@ state. Verification requires Media Assistant to be active and its position to
 advance without a reported error. Starting a new title while something is playing
 requires `--replace`.
 
-An agent can use `roomcast-mcp` over stdio instead of shell access. It exposes only
-`search`, `play`, `status` and `control`; it does not accept arbitrary source URLs,
+An agent can use `roomcast-mcp` over stdio instead of shell access. It exposes
+search, playback, status, controls, seeking, source discovery and isolated browsing; it does not accept arbitrary source URLs,
 file paths or shell commands. Configure the client with:
 
 ```json
@@ -48,20 +51,55 @@ Import `roomcast.nixosModules.default` and configure:
 ```nix
 services.roomcast = {
   enable = true;
-  lanAddress = "10.0.0.10";
-  rokuAddress = "10.0.0.20";
+  lanInterface = "wlan0";
   rokuSerial = "YOUR_TV_SERIAL";
+  rokuAddress = "10.0.0.20";
+  discoveryNetworks = [ "10.0.0.0/24" ];
 };
 ```
 
-The backend binds loopback port 18796 (`backendPort`). A systemd socket proxy listens on the chosen
-LAN address at port 18795 (`port`); the firewall accepts that port only from the configured
-Roku address. It serves token-scoped media, not control routes. The agent controls
-the service through `/run/roomcast/control.sock` (group `roomcast`, mode 0660).
-Add only the intended client service/account to that group. Use
-`config.services.roomcast.package` for client binaries so a package override
-applies to both the service and its clients. Address options require DHCP
-reservations; automatic discovery and lease-change recovery are not implemented.
+A systemd media-only socket follows `lanInterface` at `port` (default 18795).
+Control stays on `/run/roomcast/control.sock` (group `roomcast`, mode 0660).
+Media requests require both a session token and the discovered TV source address.
+The firewall exposes TCP `port` and UDP `discoveryPort` only on that interface.
+There is no proxy process or second media port in the NixOS deployment.
+
+The TV's serial is authoritative; `rokuAddress` is an optional starting hint.
+Discovery tries cached addresses, the optional `rokuMac` neighbor entry, SSDP,
+then `discoveryNetworks`. These explicit private CIDRs are limited to 1024 total
+addresses and queried in batches of 16, only on TCP 8060. Spark's advertised IP
+comes from the kernel route to the verified TV. No network settings are modified
+by the agent. Recovery is checked before playback/control; address changes during
+an existing stream can still require a new play request. Networks that block all
+peer traffic cannot be repaired by discovery.
+
+Use `config.services.roomcast.package` for client binaries so package overrides
+apply to both service and clients. Add only intended clients to the roomcast group.
+
+## YouTube and source discovery
+
+Use `search --source youtube` for videos or music and pass the returned video ID
+to `play youtube`. Playback launches the native YouTube app without relaying its
+video. Precise seeking uses a paired YouTube TV connection: open YouTube Settings,
+choose Link with TV code, and run `roomcast pair-youtube`. The CLI reads the code
+without echoing it. Tokens remain in private mutable service state, outside Git
+and the Nix store. `roomcast seek 30` requests a relative jump and verifies the TV
+position; an unconfirmed seek fails rather than reporting success. Pairing and
+precise seeking still require live acceptance on the target TV.
+
+`sources` reads `directoryUrl` (BestFreeStreaming by default), caches its current
+list for an hour, and returns opaque source IDs. Pass a returned ID as `--source`
+to search/play a site with a compatible layout. Directory membership is not proof
+of adapter compatibility; unfamiliar layouts still require an adapter update.
+When a site's layout differs, the MCP `browse` tool opens its directory entry in
+an isolated browser. The agent can inspect numbered controls, click/type/press
+Enter, and choose an opaque captured stream ID with `play(kind="browser", id=...)`.
+The browser exposes neither a shell nor caller-supplied JavaScript, uses a fresh
+profile, and expires interactive sessions after ten minutes. Only public HTTPS
+HLS captures are eligible for playback; request cookies/authorization headers
+are not forwarded. Sites requiring those cookies or unsupported media may fail.
+The directory and page contents are data, never instructions or code. Captchas,
+layout quirks and incompatible streams can still prevent playback.
 
 The service runs as its own user with no access to home directories, a private
 temporary directory, a 2 GiB memory ceiling, and bounded process/CPU use. Chromium
@@ -101,20 +139,12 @@ seek-by-text, subtitle selection, recovery after upstream URL expiry and persist
 resume positions are not implemented yet. Pause/resume and stop are supported.
 A service restart ends the relay session; request playback again.
 
-## Shared iMessage groups
+## Browser isolation
 
-This project supplies constrained tools, not group authentication. Do not give a
-roommate group your existing personal Hermes toolset. Route authenticated sender
-and chat IDs to a separate agent runtime with only this MCP server, separate
-memory, and no personal browser, shell, files, KB, scheduling or delegation tools.
-The group must not be able to change routing/allowlists or invoke the personal
-agent. Message routing and replies require an integration-specific acceptance
-test before admitting roommates. Mention gating is convenience, not permission.
-
-The browser's request checks are defense in depth; they are not a complete hostile
-browser network sandbox. Before expanding supported sites or enabling untrusted
-users, isolate browser egress at the OS/network layer too. This release does not
-claim a fully deployed multiplayer iMessage security boundary.
+Browser request checks are defense in depth, not a complete network sandbox.
+Before allowing untrusted clients, enforce browser egress restrictions at the
+OS/network layer. Agent identities, permissions and messaging integrations belong
+to the caller, outside Roomcast.
 
 ## Development and verification
 

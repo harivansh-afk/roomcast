@@ -3,7 +3,12 @@ name = "roomcast"
 version = "0.1.0"
 description = "A local, bounded streaming relay and Roku controller"
 requires-python = ">=3.12"
-dependencies = ["aiohttp>=3.12,<4", "playwright>=1.55,<2", "mcp>=1.20,<2"]
+dependencies = [
+    "aiohttp>=3.12,<4",
+    "playwright>=1.55,<2",
+    "mcp>=1.20,<2",
+    "pyytlounge>=3,<4",
+]
 
 [project.scripts]
 roomcast = "roomcast.cli:main"

@@ -1,6 +1,6 @@
 import ipaddress
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -9,9 +9,17 @@ from .fetch import validate_url
 
 @dataclass
 class Config:
-    roku_ip: str
+    roku_ip: str | None
     roku_serial: str
-    public_base: str
+    public_base: str = "http://127.0.0.1:18795"
+    lan_interface: str | None = None
+    lan_port: int = 18795
+    discovery_port: int = 18794
+    discovery_networks: list[str] = field(default_factory=list)
+    roku_mac: str | None = None
+    youtube_auth: str = "/var/lib/roomcast/youtube.json"
+    address_cache: str = "/var/lib/roomcast/address.json"
+    ip_command: str = "ip"
     control_socket: str = "/run/roomcast/control.sock"
     media_host: str = "127.0.0.1"
     media_port: int = 18796
@@ -20,18 +28,31 @@ class Config:
     max_height: int = 1080
     cache_bytes: int = 128 * 1024 * 1024
     session_seconds: int = 21600
+    directory_cache: str | None = None
+    directory_url: str = "https://www.bestfreestreaming.org/"
     site_url: str = "https://cinejoy.to"
     allowed_hosts: list[str] | None = None
 
     def __post_init__(self):
+        networks = [ipaddress.IPv4Network(n) for n in self.discovery_networks]
+        if sum(n.num_addresses for n in networks) > 1024 or any(
+            not n.is_private for n in networks
+        ):
+            raise ValueError(
+                "discovery networks must be private and total at most 1024 addresses"
+            )
         validate_url(self.site_url, None)
         site = urlsplit(self.site_url)
         if site.path not in ("", "/") or site.query:
             raise ValueError("site_url must be an HTTPS origin")
         self.site_url = self.site_url.rstrip("/")
-        ip = ipaddress.ip_address(self.roku_ip)
-        if ip.version != 4 or not ip.is_private or ip.is_loopback or ip.is_unspecified:
+        ip = ipaddress.ip_address(self.roku_ip) if self.roku_ip else None
+        if ip is not None and (
+            ip.version != 4 or not ip.is_private or ip.is_loopback or ip.is_unspecified
+        ):
             raise ValueError("roku_ip must identify a LAN device")
+        if ip is None and not self.lan_interface:
+            raise ValueError("roku_ip is required without LAN discovery")
         url = urlsplit(self.public_base)
         if (
             url.scheme != "http"
@@ -46,7 +67,7 @@ class Config:
         if (
             address.version != 4
             or not address.is_private
-            or address.is_loopback
+            or (address.is_loopback and not self.lan_interface)
             or address.is_unspecified
         ):
             raise ValueError("public_base must use a LAN IPv4 address")

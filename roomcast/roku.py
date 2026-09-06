@@ -90,23 +90,30 @@ class Roku:
             },
         )
 
+    async def launch_youtube(self, video_id):
+        await self.verify()
+        await self.request(
+            "/launch/837", {"contentId": video_id, "mediaType": "shortFormVideo"}
+        )
+
     async def command(self, command):
         await self.verify()
         if command in ("pause", "resume"):
             state = await self.status()
-            if state["app_id"] != self.app_id:
-                raise ValueError("Media Assistant is not active")
+            if state["app_id"] not in (self.app_id, "837"):
+                raise ValueError("No supported playback app is active")
             if state["state"] != ("play" if command == "pause" else "pause"):
                 return state
         await self.request("/keypress/" + self.commands[command], {})
         return await self.status()
 
-    async def confirm(self, seconds=30):
+    async def confirm(self, seconds=30, app_id=None):
+        app_id = app_id or self.app_id
         previous = None
         for _ in range(seconds // 2):
             await asyncio.sleep(2)
             state = await self.status()
-            if state["app_id"] == self.app_id and state["player_app_id"] == self.app_id:
+            if state["app_id"] == app_id and state["player_app_id"] == app_id:
                 if state["error"]:
                     raise ValueError("Roku rejected the stream")
                 if (
