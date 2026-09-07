@@ -205,6 +205,34 @@ part2.png
         self.assertFalse(self.session.raw_pending)
         self.assertFalse(self.session.prefetches)
 
+    async def test_failed_shared_work_is_owned_after_its_waiter_disconnects(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        loop = asyncio.get_running_loop()
+        previous = loop.get_exception_handler()
+        unhandled = []
+        loop.set_exception_handler(lambda loop, context: unhandled.append(context))
+
+        async def fetch(*args):
+            entered.set()
+            await release.wait()
+            raise ValueError("upstream failed after client disconnect")
+
+        self.fetch.get.side_effect = fetch
+        try:
+            request = asyncio.create_task(self.session.get(self.session.root))
+            await asyncio.wait_for(entered.wait(), 1)
+            request.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await request
+            release.set()
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.assertFalse(self.session.pending)
+            self.assertFalse(self.session.raw_pending)
+            self.assertFalse(unhandled)
+        finally:
+            loop.set_exception_handler(previous)
+
 
 if __name__ == "__main__":
     unittest.main()

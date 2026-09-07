@@ -219,10 +219,6 @@ class Service:
                             start_seconds=start,
                         )
                         try:
-                            try:
-                                await self.prepare(candidate)
-                            finally:
-                                self.job_state["preflight"] = candidate.preflight
                             files = resolved.get("subtitles", {}).get(source, [])
                             preferred = choose(files, self.config.subtitle_language)
                             candidate.subtitle_tracks.extend(
@@ -230,6 +226,22 @@ class Service:
                                     :8
                                 ]
                             )
+                            if (
+                                preferred
+                                and self.config.roku_subtitle_control
+                                and self.config.subtitles_enabled
+                            ):
+                                candidate.prefetch(
+                                    [
+                                        candidate.register(
+                                            preferred["url"], role="subtitle-file"
+                                        )
+                                    ]
+                                )
+                            try:
+                                await self.prepare(candidate)
+                            finally:
+                                self.job_state["preflight"] = candidate.preflight
                             subtitle_params = None
                             if self.config.roku_subtitle_control:
                                 selected = choose(

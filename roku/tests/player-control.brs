@@ -22,6 +22,12 @@ sub main()
     m.top.request = {u: "http://relay/media/latest-session"}
     handleRequest()
     check(m.pending.u = m.top.request.u, "latest replacement was lost during stop")
+    m.subtitleReady = false
+    m.subtitleConfig = {subtitlesEnabled: true}
+    m.video.globalCaptionMode = "Off"
+    applySubtitles()
+    reportSubtitles()
+    check(m.video.globalCaptionMode = "Off", "replacement used the previous title's caption state")
     print "All player control tests passed."
 end sub
 

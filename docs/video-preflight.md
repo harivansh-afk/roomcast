@@ -22,7 +22,10 @@ an audio-only transport stream.
 Before launch, decode one complete segment at the requested start position of each
 selected track, with audio and video prepared concurrently. Prefer variant hints
 within the configured height before trying oversized hints; actual decoded media
-still decides compatibility. Verify decoded audio/video, codec constraints and
+still decides compatibility. A small fMP4 init probe rejects known incompatible
+dimensions/codecs before fetching the large fragment. Init probes can omit profile,
+pixel format and frame rate; missing metadata is deferred to the actual media
+probe rather than treated as incompatibility. Verify decoded audio/video, codec constraints and
 segment durations. Compare audio/video timestamp origins after accounting for
 their independently segmented playlist offsets. Every subsequently fetched media segment undergoes the same validation
 before it can be served, including after cache eviction. Black frames and silence

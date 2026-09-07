@@ -60,10 +60,15 @@ class RealMediaTests(unittest.IsolatedAsyncioTestCase):
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory()
         root = Path(cls.directory.name)
-        for name in ("video", "audio", "muxed"):
+        for name in ("video", "audio", "muxed", "wide"):
             args = ["ffmpeg", "-v", "error"]
             if name != "audio":
-                args += ["-f", "lavfi", "-i", "testsrc2=size=128x72:rate=24"]
+                args += [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"testsrc2=size={2048 if name == 'wide' else 128}x72:rate=24",
+                ]
             if name != "video":
                 args += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"]
             args += ["-t", "6", "-threads", "1"]
@@ -341,3 +346,13 @@ video.m3u8
         self.fetcher.get.side_effect = fetch
         await self.session.prepare()
         self.assertTrue(video.is_set() and audio.is_set())
+
+    async def test_incompatible_init_rejects_before_downloading_a_large_segment(self):
+        self.data["master.m3u8"] += (
+            b"#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080\nwide.m3u8\n"
+        )
+        await self.session.prepare()
+        fetched = [call.args[0] for call in self.fetcher.get.await_args_list]
+        self.assertIn(BASE + "wide-init.mp4", fetched)
+        self.assertNotIn(BASE + "wide0.m4s", fetched)
+        self.assertEqual(self.session.preflight["variants_attempted"], 2)
