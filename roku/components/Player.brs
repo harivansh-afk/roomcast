@@ -45,6 +45,7 @@ sub startVideo()
     m.pending = invalid
     m.subtitleTimer.control = "stop"
     m.subtitleConfig = invalid
+    m.subtitleReady = false
     content = CreateObject("roSGNode", "ContentNode")
     content.title = textValue(request.videoName)
     content.url = request.u
@@ -69,6 +70,11 @@ sub playerState()
         startVideo()
     else if state = "playing"
         m.video.autoplayAfterSeek = true
+        if m.subtitleReady <> true
+            m.subtitleReady = true
+            applySubtitles()
+            if m.subtitlePending then m.subtitleTimer.control = "start"
+        end if
         if m.startReported <> true and m.playbackReportUrl <> ""
             m.startReported = true
             report = {startup_seconds: m.video.timeToStartStreaming}
@@ -110,7 +116,7 @@ sub configureSubtitles(request)
     m.subtitlePolls = 32
     if m.subtitleReporter <> invalid then m.subtitleReporter.control = "STOP"
     applySubtitles()
-    if m.subtitlePending then m.subtitleTimer.control = "start"
+    if m.subtitlePending and m.subtitleReady = true then m.subtitleTimer.control = "start"
 end sub
 
 sub pollSubtitles()
@@ -123,6 +129,9 @@ sub pollSubtitles()
 end sub
 
 sub applySubtitles()
+    ' A reused Video node can retain the previous title's tracks until playback.
+    ' Do not acknowledge those fields or spend the retry window on buffering.
+    if m.subtitleReady <> true then return
     if m.subtitleConfig = invalid or m.applyingSubtitles = true then return
     if m.subtitlePending <> true
         reportSubtitles()
@@ -143,6 +152,7 @@ sub applySubtitles()
 end sub
 
 sub reportSubtitles()
+    if m.subtitleReady <> true then return
     if m.subtitleConfig = invalid or m.applyingSubtitles = true then return
     if m.subtitleConfig.subtitleReportUrl = "" or m.subtitleConfig.subtitleRequest = "" then return
     report = roomcastSubtitleState(m.video, m.subtitleConfig)

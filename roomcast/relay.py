@@ -60,6 +60,7 @@ class Session:
         self.subtitle_event = asyncio.Event()
         self.roles = {}
         self.evidence = {}
+        self.checked_inits = set()
         self.delivered = set()
         self.failure = None
         self.playlists = {}
@@ -111,6 +112,15 @@ class Session:
             raise ValueError("pinned playlist budget exceeded")
         self.playlists[url] = (body, final)
 
+    @staticmethod
+    def forget(pending, key, task):
+        if pending.get(key) is task:
+            pending.pop(key)
+        # A cancelled waiter can leave a shared job without another waiter.
+        # Retrieve its exception; callers still receive the original failure.
+        if not task.cancelled():
+            task.exception()
+
     async def raw(self, url, limit=None, *, cache=True):
         if url in self.playlists:
             result = self.playlists[url]
@@ -140,7 +150,9 @@ class Session:
 
             task = asyncio.create_task(fetch())
             self.raw_pending[url] = task
-            task.add_done_callback(lambda done: self.raw_pending.pop(url, None))
+            task.add_done_callback(
+                lambda done: self.forget(self.raw_pending, url, done)
+            )
         data, final = await asyncio.shield(self.raw_pending[url])
         if limit and len(data) > limit:
             raise ValueError("upstream object exceeds limit")
@@ -381,6 +393,16 @@ class Session:
             from .subtitles import MAX_SUBTITLE_BYTES, subtitle_text
 
             is_subtitle = resource.role in ("subtitle", "subtitle-file")
+            init = b""
+            if resource.init:
+                init, init_final = await self.raw(resource.init)
+                check = (resource.init, resource.role)
+                if resource.role and check not in self.checked_inits:
+                    from .preflight import inspect_init
+
+                    await inspect_init(init, self.config, resource.role)
+                    self.checked_inits.add(check)
+                self.pin_playlist(resource.init, init, init_final)
             data, final = await self.raw(
                 resource.url,
                 MAX_SUBTITLE_BYTES if is_subtitle else None,
@@ -396,10 +418,6 @@ class Session:
             elif is_subtitle:
                 result = subtitle_text(data, segmented=resource.role == "subtitle")
             else:
-                init = b""
-                if resource.init:
-                    init, init_final = await self.raw(resource.init)
-                    self.pin_playlist(resource.init, init, init_final)
                 if resource.role == "muxed" and init:
                     data = await self.remux(data, init)
                     init = b""
@@ -445,7 +463,7 @@ class Session:
         if key not in self.pending:
             task = asyncio.create_task(self._load(key))
             self.pending[key] = task
-            task.add_done_callback(lambda done: self.pending.pop(key, None))
+            task.add_done_callback(lambda done: self.forget(self.pending, key, done))
         return await asyncio.shield(self.pending[key])
 
     async def close(self):
@@ -463,6 +481,7 @@ class Session:
         self.selections.clear()
         self.audio_selections.clear()
         self.evidence.clear()
+        self.checked_inits.clear()
         self.roles.clear()
         self.following.clear()
         self.selected_playlists.clear()

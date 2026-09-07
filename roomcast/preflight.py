@@ -100,7 +100,7 @@ def audio_evidence(streams):
     return result
 
 
-def video_evidence(streams, max_height):
+def video_parameters(streams, max_height):
     video = [s for s in streams if s.get("codec_type") == "video"]
     if len(video) != 1:
         raise ValueError("presentation must contain one video stream")
@@ -109,18 +109,8 @@ def video_evidence(streams, max_height):
         width, height, level = (
             int(stream.get(k, 0)) for k in ("width", "height", "level")
         )
-        fps = Fraction(stream.get("avg_frame_rate", "0/0"))
-        if fps <= 0:
-            fps = Fraction(stream.get("r_frame_rate", "0/0"))
-    except (TypeError, ValueError, ZeroDivisionError):
-        # MPEG-TS commonly supplies only r_frame_rate.
-        try:
-            fps = Fraction(stream.get("r_frame_rate", "0/0"))
-            width, height, level = (
-                int(stream.get(k, 0)) for k in ("width", "height", "level")
-            )
-        except (TypeError, ValueError, ZeroDivisionError):
-            raise ValueError("unknown video parameters") from None
+    except (TypeError, ValueError):
+        raise ValueError("unknown video parameters") from None
     if (
         stream.get("codec_name") != "h264"
         or stream.get("profile")
@@ -129,18 +119,9 @@ def video_evidence(streams, max_height):
     ):
         raise ValueError("video requires 8-bit 4:2:0 H.264")
     if not (
-        0 < width <= 1920
-        and 0 < height <= min(max_height, 1080)
-        and 0 < level <= 42
-        and 0 < fps <= 60
+        0 < width <= 1920 and 0 < height <= min(max_height, 1080) and 0 < level <= 42
     ):
         raise ValueError("video exceeds FHD H.264 limits")
-    # Level 4.2 maximum macroblocks/second, with lower levels capped at 30 fps
-    # for FHD; avoids accepting implausible headers.
-    if ((width + 15) // 16) * ((height + 15) // 16) * fps > (
-        522240 if level == 42 else 245760
-    ):
-        raise ValueError("video exceeds H.264 frame-rate limits")
     return {
         "codec": "h264",
         "profile": stream["profile"],
@@ -148,8 +129,49 @@ def video_evidence(streams, max_height):
         "width": width,
         "height": height,
         "level": level,
-        "fps": round(float(fps), 3),
     }
+
+
+def video_evidence(streams, max_height):
+    result = video_parameters(streams, max_height)
+    stream = next(s for s in streams if s.get("codec_type") == "video")
+    fps = 0
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            fps = Fraction(stream.get(key, "0/0"))
+            if fps > 0:
+                break
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    if not 0 < fps <= 60:
+        raise ValueError("video exceeds H.264 frame-rate limits")
+    if ((result["width"] + 15) // 16) * ((result["height"] + 15) // 16) * fps > (
+        522240 if result["level"] == 42 else 245760
+    ):
+        raise ValueError("video exceeds H.264 frame-rate limits")
+    return {**result, "fps": round(float(fps), 3)}
+
+
+async def inspect_init(data, config, role):
+    """Reject incompatible fMP4 using its small init before downloading media.
+
+    Frame rate and decoded coverage still require the actual media segment.
+    """
+    if role not in ("muxed", "video"):
+        return
+    streams = await probe(data, config.ffprobe)
+    for stream in streams:
+        if stream.get("codec_type") != "video":
+            continue
+        # Empty fMP4 init probes often omit profile/pixel format/frame rate.
+        # Unknown fields must be resolved from real media, never guessed here.
+        if stream.get("codec_name") not in (None, "unknown", "h264"):
+            raise ValueError("video requires H.264")
+        if (
+            int(stream.get("width", 0)) > 1920
+            or int(stream.get("height", 0)) > config.max_height
+        ):
+            raise ValueError("video exceeds FHD H.264 limits")
 
 
 async def decode_media(data, executable, required):

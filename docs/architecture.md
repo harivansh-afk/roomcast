@@ -22,8 +22,11 @@ flowchart LR
 2. Discover the current provider menu and fresh playlists in an isolated browser.
    Text-only resolution skips images/fonts; an HLS response wakes the resolver
    immediately. Interactive browsing keeps its normal page resources.
-3. Select a compatible presentation. Validate only the complete segment needed
+3. Select a compatible presentation. Reject known incompatible dimensions/codecs
+   from fMP4 initialization data before fetching a large video fragment. Unknown
+   init metadata is left for full segment inspection. Validate only the complete segment needed
    at the requested timestamp in each track. Retain the full VOD timeline.
+   The preferred provider subtitle file loads alongside media preparation.
 4. Publish the session and launch the TV while preparing the following segments.
 5. Confirm the intended app/player, both formats, current-session delivery and
    two advancing samples. Continue monitoring after returning success.
@@ -54,6 +57,10 @@ loop. It supports launch, replacement after the previous stream stops, exact
 seeking, native captions and the native remote UI. The old upstream audio UI,
 settings, queue and duplicated deep-link parsers are removed. Only the existing
 branding assets are retained from Media Assistant, with its license.
+
+Caption confirmation waits for the new content's first playing state. A reused
+Video node may retain the previous title's tracks while stopping or buffering;
+those fields must not acknowledge a new subtitle request or consume its retry window.
 
 The manifest has no artificial splash minimum and enables input launches.
 The native decoder and buffering remain Roku OS components. We have not changed
