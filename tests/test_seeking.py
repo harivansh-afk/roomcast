@@ -238,6 +238,7 @@ class SeekingAPITests(unittest.IsolatedAsyncioTestCase):
             self.service.session.link(self.service.session.root),
             "Episode",
             start_seconds=1200,
+            report_url=f"{self.service.config.public_base}/player-state/{self.service.session.token}",
         )
         self.assertEqual(
             self.service.roku.confirm.call_args.kwargs["start_seconds"], 1200

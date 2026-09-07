@@ -31,7 +31,7 @@ class Resolver:
             ],
         )
 
-    async def context(self):
+    async def context(self, lightweight=False):
         if self.browser is None:
             await self.start()
         context = await self.browser.new_context(
@@ -40,6 +40,9 @@ class Resolver:
 
         # Prevent sites from probing local services, even though no private profile exists.
         async def route(request):
+            if lightweight and request.request.resource_type in ("image", "font"):
+                await request.abort()
+                return
             url = urlsplit(request.request.url)
             if url.scheme not in ("https", "data", "blob"):
                 await request.abort()
@@ -76,7 +79,7 @@ class Resolver:
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 120:
             raise ValueError("query must be 1–120 characters")
         async with self.lock, asyncio.timeout(45):
-            context = await self.context()
+            context = await self.context(lightweight=True)
             try:
                 page = await context.new_page()
                 await page.goto(origin + "/", wait_until="domcontentloaded")
@@ -114,7 +117,7 @@ class Resolver:
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 120:
             raise ValueError("query must be 1–120 characters")
         async with self.lock, asyncio.timeout(45):
-            context = await self.context()
+            context = await self.context(lightweight=True)
             try:
                 page = await context.new_page()
                 await page.goto(
@@ -153,11 +156,12 @@ class Resolver:
             else f"/watch/movie/{content_id}"
         )
         async with self.lock:
-            context = await self.context()
+            context = await self.context(lightweight=True)
             try:
                 page = await context.new_page()
                 candidates = []
                 candidate_frames = {}
+                ready = asyncio.Event()
 
                 def observe(response):
                     url = response.url
@@ -175,6 +179,7 @@ class Resolver:
                             return
                         if url not in candidates:
                             candidates.append(url)
+                            ready.set()
                             try:
                                 candidate_frames[url] = response.request.frame
                             except Exception:
@@ -205,13 +210,14 @@ class Resolver:
                                 ).click()
                             candidates.clear()
                             candidate_frames.clear()
+                            ready.clear()
                         await page.get_by_role(
                             "button", name=provider, exact=True
                         ).click(timeout=5000)
-                        for _ in range(20):
-                            if candidates:
-                                break
-                            await asyncio.sleep(0.5)
+                        try:
+                            await asyncio.wait_for(ready.wait(), 10)
+                        except TimeoutError:
+                            continue
                         if candidates:
                             yield {
                                 "title": title,

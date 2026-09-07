@@ -160,6 +160,51 @@ part2.png
         self.assertEqual(self.session.cache_size, 8)
         self.assertNotIn("a", self.session.cache)
 
+    async def test_raw_init_fetch_is_shared_and_each_caller_enforces_its_limit(self):
+        async def fetch(*args, **kwargs):
+            await asyncio.sleep(0.01)
+            return b"initialization", BASE + "init.mp4"
+
+        self.fetch.get.side_effect = fetch
+        results = await asyncio.gather(
+            self.session.raw(BASE + "init.mp4", 100),
+            self.session.raw(BASE + "init.mp4", 2),
+            return_exceptions=True,
+        )
+        self.assertEqual(results[0][0], b"initialization")
+        self.assertIsInstance(results[1], ValueError)
+        self.fetch.get.assert_awaited_once()
+        with self.assertRaises(ValueError):
+            await self.session.raw(BASE + "init.mp4", 2)
+
+    async def test_prefetch_is_bounded_leaves_demand_capacity_and_stops_cleanly(self):
+        entered = asyncio.Event()
+        active = 0
+
+        async def fetch(url, *args, **kwargs):
+            nonlocal active
+            if not url.endswith("demand"):
+                active += 1
+                if active == 2:
+                    entered.set()
+                await asyncio.Event().wait()
+            return b"data", url
+
+        self.fetch.get.side_effect = fetch
+        keys = [self.session.register(BASE + str(i)) for i in range(20)]
+        self.session.prefetch(keys)
+        await asyncio.wait_for(entered.wait(), 1)
+        self.assertEqual(len(self.session.prefetches), 4)
+        self.assertEqual(active, 2)
+        demand = self.session.register(BASE + "demand")
+        self.assertEqual(
+            (await asyncio.wait_for(self.session.get(demand), 1))[0], b"data"
+        )
+        await self.session.close()
+        self.assertFalse(self.session.pending)
+        self.assertFalse(self.session.raw_pending)
+        self.assertFalse(self.session.prefetches)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,12 @@
+title=Roomcast Player
+major_version=1
+minor_version=4
+build_version=0
+mm_icon_focus_fhd=pkg:/images/fhd_poster.png
+mm_icon_focus_hd=pkg:/images/hd_poster.png
+splash_screen_fhd=pkg:/images/fhd_splash.png
+splash_screen_hd=pkg:/images/hd_splash.png
+splash_min_time=0
+splash_color=#232323
+ui_resolutions=hd
+supports_input_launch=1

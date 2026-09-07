@@ -19,7 +19,7 @@ def default_socket():
 async def call(socket, method, path, data=None, params=None):
     async with aiohttp.ClientSession(
         connector=aiohttp.UnixConnector(path=socket),
-        timeout=aiohttp.ClientTimeout(total=90),
+        timeout=aiohttp.ClientTimeout(total=120),
     ) as client:
         async with client.request(
             method, "http://localhost" + path, json=data, params=params

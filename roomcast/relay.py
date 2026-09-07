@@ -22,7 +22,7 @@ class Resource:
 
 
 class Session:
-    def __init__(self, fetcher, config, source, headers, title):
+    def __init__(self, fetcher, config, source, headers, title, start_seconds=0):
         validate_url(source, config.allowed_hosts)
         self.fetcher, self.config = fetcher, config
         self.headers, self.title = headers, title
@@ -32,6 +32,12 @@ class Session:
         self.cache = OrderedDict()
         self.cache_size = 0
         self.pending = {}
+        self.raw_pending = {}
+        self.prefetches = {}
+        self.prefetch_slots = asyncio.Semaphore(2)
+        self.following = {}
+        self.selected_playlists = []
+        self.start_seconds = start_seconds
         self.work = asyncio.Semaphore(4)
         self.remux_slots = asyncio.Semaphore(2)
         self.tasks = set()
@@ -42,6 +48,7 @@ class Session:
             "remux_seconds": 0.0,
             "segments_remuxed": 0,
             "fetch_seconds": 0.0,
+            "validation_seconds": 0.0,
         }
         self.selections = {}
         self.audio_selections = {}
@@ -49,6 +56,7 @@ class Session:
         self.subtitle_error = None
         self.subtitle_request = None
         self.subtitle_report = None
+        self.player_report = None
         self.subtitle_event = asyncio.Event()
         self.roles = {}
         self.evidence = {}
@@ -103,21 +111,41 @@ class Session:
             raise ValueError("pinned playlist budget exceeded")
         self.playlists[url] = (body, final)
 
-    async def raw(self, url, limit=None):
+    async def raw(self, url, limit=None, *, cache=True):
         if url in self.playlists:
-            return self.playlists[url]
+            result = self.playlists[url]
+            if limit and len(result[0]) > limit:
+                raise ValueError("upstream object exceeds limit")
+            return result
         key = ("raw", url)
         if key in self.cache:
             self.cache.move_to_end(key)
             self.metrics["cache_hits"] += 1
-            return self.cache[key]
-        start = time.monotonic()
-        data, final = await self.fetcher.get(
-            url, self.headers, **({"limit": limit} if limit else {})
-        )
-        self.metrics["fetch_seconds"] += time.monotonic() - start
-        self.metrics["upstream_bytes"] += len(data)
-        self.put(key, (data, final))
+            result = self.cache[key]
+            if limit and len(result[0]) > limit:
+                raise ValueError("upstream object exceeds limit")
+            return result
+        # Init objects can be requested by several segments simultaneously.
+        # Coalesce those downloads, including the resource-less preflight reads.
+        if url not in self.raw_pending:
+
+            async def fetch():
+                start = time.monotonic()
+                result = await self.fetcher.get(
+                    url, self.headers, **({"limit": limit} if limit else {})
+                )
+                self.metrics["fetch_seconds"] += time.monotonic() - start
+                self.metrics["upstream_bytes"] += len(result[0])
+                return result
+
+            task = asyncio.create_task(fetch())
+            self.raw_pending[url] = task
+            task.add_done_callback(lambda done: self.raw_pending.pop(url, None))
+        data, final = await asyncio.shield(self.raw_pending[url])
+        if limit and len(data) > limit:
+            raise ValueError("upstream object exceeds limit")
+        if cache:
+            self.put(key, (data, final))
         return data, final
 
     def rewrite(self, body, base):
@@ -257,7 +285,35 @@ class Session:
                 else line
                 for line in output
             ]
+        for index, key in enumerate(segments):
+            self.following[key] = segments[index + 1 : index + 3]
         return ("\n".join(output) + "\n").encode(), segments
+
+    def at_position(self, segments, position):
+        offset = 0.0
+        for key in segments:
+            duration = self.resources[key].duration
+            if offset + duration > position:
+                return key, offset
+            offset += duration
+        return segments[-1], offset - self.resources[segments[-1]].duration
+
+    def prime(self, position):
+        for segments in self.selected_playlists:
+            key, _ = self.at_position(segments, position)
+            self.prefetch([key, *self.following[key]])
+
+    def prefetch(self, keys):
+        # At most four queued, two running. Demand has two free work slots.
+        # Prefetch is driven by the playhead, never recursively by a fetch.
+        for key in keys:
+            if self.closed or len(self.prefetches) >= 4:
+                break
+            if key in self.cache or key in self.pending or key in self.prefetches:
+                continue
+            task = asyncio.create_task(self._prefetch(key))
+            self.prefetches[key] = task
+            task.add_done_callback(lambda done, key=key: self.prefetches.pop(key, None))
 
     async def remux(self, data, init):
         async with self.remux_slots:
@@ -326,7 +382,9 @@ class Session:
 
             is_subtitle = resource.role in ("subtitle", "subtitle-file")
             data, final = await self.raw(
-                resource.url, MAX_SUBTITLE_BYTES if is_subtitle else None
+                resource.url,
+                MAX_SUBTITLE_BYTES if is_subtitle else None,
+                cache=not resource.duration,
             )
             if data.startswith((b"#EXTM3U", b"\xef\xbb\xbf#EXTM3U")):
                 if resource.role == "subtitle-file":
@@ -335,10 +393,6 @@ class Session:
                     self.roles[final] = "subtitle"
                 data, segments = self.rewrite(data, final)
                 result = data, "application/vnd.apple.mpegurl"
-                for upcoming in segments[:2]:
-                    task = asyncio.create_task(self._prefetch(upcoming))
-                    self.tasks.add(task)
-                    task.add_done_callback(self.tasks.discard)
             elif is_subtitle:
                 result = subtitle_text(data, segmented=resource.role == "subtitle")
             else:
@@ -352,9 +406,11 @@ class Session:
                 if resource.role:
                     from .preflight import inspect_media
 
+                    started = time.monotonic()
                     evidence = await inspect_media(
                         init + data, self.config, resource.role, resource.duration
                     )
+                    self.metrics["validation_seconds"] += time.monotonic() - started
                     self.evidence[key] = evidence
                     self.metrics["segments_verified"] = (
                         self.metrics.get("segments_verified", 0) + 1
@@ -372,7 +428,8 @@ class Session:
 
     async def _prefetch(self, key):
         try:
-            await self.get(key)
+            async with self.prefetch_slots:
+                await self.get(key)
         except Exception:
             pass
 
@@ -393,7 +450,12 @@ class Session:
 
     async def close(self):
         self.closed = True
-        tasks = list(self.tasks) + list(self.pending.values())
+        tasks = (
+            list(self.tasks)
+            + list(self.prefetches.values())
+            + list(self.pending.values())
+            + list(self.raw_pending.values())
+        )
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -402,5 +464,7 @@ class Session:
         self.audio_selections.clear()
         self.evidence.clear()
         self.roles.clear()
+        self.following.clear()
+        self.selected_playlists.clear()
         self.cache.clear()
         self.cache_size = 0

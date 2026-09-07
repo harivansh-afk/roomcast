@@ -52,6 +52,9 @@ def main():
     play.add_argument("--replace", action="store_true")
     play.add_argument("--source", default="cinejoy")
     play.add_argument("--start", dest="start_seconds", type=timestamp, default=0)
+    play.add_argument(
+        "--no-wait", action="store_true", help="return as soon as playback is queued"
+    )
     for action in get_args(Command):
         sub.add_parser(action)
     args = parser.parse_args()
@@ -76,7 +79,7 @@ def main():
                     "start_seconds",
                 )
             },
-            None,
+            {"wait": "false" if args.no_wait else "true"},
         )
     elif args.action == "seek":
         if (args.seconds is None) == (args.to is None):

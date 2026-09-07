@@ -7,26 +7,29 @@
 }:
 stdenvNoCC.mkDerivation {
   pname = "roomcast-roku-player";
-  version = "1.3.5";
+  version = "1.4.0";
   src = fetchFromGitHub {
     owner = "MedievalApple";
     repo = "Media-Assistant";
     rev = "1335dd41aad175ad7494f01f7e2c21a582d06179";
     hash = "sha256-gDxVvX6EoozV7GncM55kste3Q2XLtCO2WmbE95obPXE=";
   };
-  patches = [
-    ./timestamp-seeking.patch
-    ./subtitle-controls.patch
-  ];
   postPatch = ''
+    rm -rf source components
+    cp -r ${./source} source
+    cp -r ${./components} components
+    cp ${./manifest} manifest
     cp ${../LICENSE} ROOMCAST-LICENSE
-    cp ${./components}/* components/
+    mkdir branding
+    cp images/{fhd_poster,hd_poster,fhd_splash,hd_splash}.png branding/
+    rm -rf images
+    mv branding images
   '';
   nativeBuildInputs = [ zip ];
   nativeCheckInputs = [ unzip ];
   buildPhase = ''
     runHook preBuild
-    zip -qr roomcast-player.zip manifest source components images locale LICENSE ROOMCAST-LICENSE
+    zip -qr roomcast-player.zip manifest source components images LICENSE ROOMCAST-LICENSE
     runHook postBuild
   '';
   doCheck = true;
@@ -42,8 +45,8 @@ stdenvNoCC.mkDerivation {
     runHook postInstall
   '';
   meta = {
-    description = "Optional Media Assistant build with Roomcast timestamp controls";
-    homepage = "https://github.com/MedievalApple/Media-Assistant";
+    description = "Roomcast native Roku video player";
+    homepage = "https://git.harivan.sh/harivansh-afk/roomcast";
     license = [
       lib.licenses.asl20
       lib.licenses.gpl3Only

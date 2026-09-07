@@ -9,7 +9,8 @@ no supported tracks reports that fact and continues video/audio playback.
 
 Build `nix build .#roku-player` and install `result/roomcast-player.zip` using the
 Roku development installer when viewing has finished. This version is Roomcast
-Player 1.3.5. Sideloading replaces the existing `dev` app. Configure the service:
+Player 1.4.0. It retains the 1.3.5 subtitle protocol in a smaller native player.
+Sideloading replaces the existing `dev` app. Configure the service:
 
 ```nix
 services.roomcast = {
