@@ -258,17 +258,15 @@ async def sample(session, url, role):
     if not segments:
         raise ValueError("playlist has no media segments")
     session.pin_playlist(url, body, final)
-    # Consecutive startup segments plus distant samples catch late track changes.
-    indices = sorted(
-        {0, min(1, len(segments) - 1), len(segments) // 2, len(segments) - 1}
-    )
-    for index in indices:
-        await session.get(segments[index])
-    evidence = session.evidence[segments[0]]
+    # Validate the bytes playback needs now. Distant samples delay startup and
+    # cannot guarantee the rest of a movie; every delivered segment is checked.
+    key, offset = session.at_position(segments, session.start_seconds)
+    await session.get(key)
+    evidence = {**session.evidence[key], "timeline_offset": offset}
     return (
         evidence,
         sum(session.resources[key].duration for key in segments),
-        len(indices),
+        segments,
     )
 
 
@@ -313,15 +311,21 @@ async def _prepare(session):
                 raise ValueError("invalid variant URI")
             variants.append((rank, index, attrs))
     if not variants:
-        evidence, duration, count = await sample(session, source, "muxed")
+        evidence, duration, segments = await sample(session, source, "muxed")
         audio, video = evidence["audio"], evidence["video"]
         external, attempted = False, 1
+        selected = [segments]
     else:
         if len(variants) > MAX_VARIANTS:
             raise ValueError("master variant limit exceeded")
         failures = []
         for attempted, (_, index, attrs) in enumerate(
-            sorted(variants, reverse=True), 1
+            sorted(
+                variants,
+                key=lambda v: (v[0][0] <= session.config.max_height, v[0]),
+                reverse=True,
+            ),
+            1,
         ):
             group = value(attrs, "AUDIO")
             tracks = (
@@ -351,34 +355,53 @@ async def _prepare(session):
                     session.audio_selections[base] = audio_index
                     session.rewrite(body, base)
                     external = bool(uri)
-                    evidence, duration, count = await sample(
-                        session,
-                        urljoin(base, lines[index + 1]),
-                        "video" if external else "muxed",
-                    )
-                    video = evidence["video"]
                     if external:
-                        sound, audio_duration, audio_count = await sample(
-                            session, urljoin(base, uri), "audio"
-                        )
+                        # Audio and video are independent network/decode work.
+                        # Cancel the sibling on failure before trying a variant.
+                        tasks = [
+                            asyncio.create_task(
+                                sample(
+                                    session, urljoin(base, lines[index + 1]), "video"
+                                )
+                            ),
+                            asyncio.create_task(
+                                sample(session, urljoin(base, uri), "audio")
+                            ),
+                        ]
+                        try:
+                            (
+                                (evidence, duration, segments),
+                                (sound, audio_duration, audio_segments),
+                            ) = await asyncio.gather(*tasks)
+                        finally:
+                            for task in tasks:
+                                task.cancel()
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                        selected = [segments, audio_segments]
                         if abs(duration - audio_duration) > 1:
                             raise ValueError(
                                 "audio and video playlists have different durations"
                             )
-                        if (
-                            abs(
-                                evidence["decoded"]["video"]["start"]
-                                - sound["decoded"]["audio"]["start"]
-                            )
-                            > 0.5
-                        ):
+                        video_start = (
+                            evidence["decoded"]["video"]["start"]
+                            - evidence["timeline_offset"]
+                        )
+                        audio_start = (
+                            sound["decoded"]["audio"]["start"]
+                            - sound["timeline_offset"]
+                        )
+                        if abs(video_start - audio_start) > 0.5:
                             raise ValueError(
                                 "external audio and video timestamps do not align"
                             )
                         audio = sound["audio"]
-                        count += audio_count
                     else:
+                        evidence, duration, segments = await sample(
+                            session, urljoin(base, lines[index + 1]), "muxed"
+                        )
                         audio = evidence["audio"]
+                        selected = [segments]
+                    video = evidence["video"]
                     break
                 except Exception as error:
                     failures.append(
@@ -400,7 +423,8 @@ async def _prepare(session):
         "video": video,
         "audio": audio,
         "external_audio": external,
-        "segments_sampled": count,
+        "segments_sampled": len(selected),
+        "start_seconds": session.start_seconds,
         "duration_seconds": round(duration, 3),
         "variants_attempted": attempted,
         "visual_verified": False,
@@ -421,3 +445,5 @@ async def _prepare(session):
         body = ("\n".join(lines) + "\n").encode()
     session.pin_playlist(source, body, base)
     await session.get(session.root)
+    session.selected_playlists = selected
+    session.prime(session.start_seconds)

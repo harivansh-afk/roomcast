@@ -17,7 +17,8 @@ Roomcast previously allowed only relative YouTube seeks, while
 does not handle a start timestamp or seek action. Its `timeOffset` changes the
 audio time display; it is not a video start offset.
 
-The optional player package applies a small patch to that pinned upstream source:
+Roomcast Player 1.4.0 implements this protocol directly using a native Video node
+and one input loop. It replaces the previous patches to Media Assistant:
 
 - Launch/input `startSeconds` sets `ContentNode.PlayStart` before playback.
 - Input `a=seek&positionSeconds=1200&stayPaused=true|false` sets `Video.seek`.
@@ -28,7 +29,7 @@ The optional player package applies a small patch to that pinned upstream source
 These are documented Roku [content fields](https://developer.roku.com/dev/docs/content-metadata)
 and [Video controls](https://developer.roku.com/dev/docs/video). Accurate seeking
 depends on the device decoder; a successful HTTP command alone is not evidence
-of an accurate landing. No voice-transport capability is advertised by the patch.
+of an accurate landing. No voice-transport capability is advertised by the player.
 
 ## Optional installation, after viewing
 
@@ -38,9 +39,9 @@ Building does not install the app or contact the TV:
 nix build .#roku-player
 ```
 
-The output is `result/roomcast-player.zip`. It contains the pinned Media Assistant
-source and assets with the timestamp patch; upstream's Apache-2.0 license is
-preserved, and the Roomcast changes are covered by `ROOMCAST-LICENSE` (GPL-3.0).
+The output is `result/roomcast-player.zip`. It contains Roomcast's player source
+and the existing Media Assistant branding assets. Upstream's Apache-2.0 license
+is preserved for those assets; Roomcast is covered by `ROOMCAST-LICENSE` (GPL-3.0).
 The app title is Roomcast Player. No upstream artwork is checked into this repo.
 
 When ready to test, sideload the ZIP using Roku's development installer. Sideloading
@@ -86,14 +87,21 @@ seek near the end can finish before enough confirmation samples arrive.
 
 Offline checks cover service requests, CLI translation, Roku command parameters,
 position confirmation, pause/cancellation, media decoding and the player build.
-BrightScript compilation can be repeated against the patched source with
-`npm exec --yes --package=brighterscript@0.73.1 -- bsc --rootDir PATH --outFile /tmp/roomcast-player.zip`.
+Compile the source with:
 
-Physical acceptance is pending. On the target TV, check a non-keyframe 20-minute
+```sh
+npm exec --yes --package=brighterscript@0.73.1 -- bsc --root-dir roku \
+  --files 'source/**/*' 'components/**/*' --no-project \
+  --create-package false --copy-to-staging false
+npm exec --yes --package=brs@0.45.0 -- brs --root roku/tests \
+  roku/components/Player.brs roku/components/subtitleState.brs roku/tests/player-control.brs
+```
+
+For a new player build, check a non-keyframe 20-minute
 start, forward/backward seeks, seeking to zero, a paused seek followed by resume,
 native remote scrubbing before the start offset, and audio/video continuity on
-both split fMP4 and muxed HLS. This change has not been installed or tested on the
-TV; no live playback was interrupted for its development.
+both split fMP4 and muxed HLS. See [acceptance](acceptance.md) for tested versions
+and measurements; compilation alone does not establish TV compatibility.
 
 Roomcast Player 1.3.3 also adds [subtitle controls](subtitles.md). Enable
 `playerSupportsSubtitles` after installing that version to request captions on

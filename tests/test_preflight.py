@@ -131,7 +131,7 @@ video.m3u8
     async def test_separate_tracks_keep_initialization_and_decode_across_timeline(self):
         evidence = await self.session.prepare()
         self.assertTrue(evidence["external_audio"])
-        self.assertEqual(evidence["segments_sampled"], 8)
+        self.assertEqual(evidence["segments_sampled"], 2)
         self.assertFalse(evidence["visual_verified"])
         for name, role in (("video", "video"), ("audio", "audio")):
             url = BASE + name + ".m3u8"
@@ -211,10 +211,18 @@ video.m3u8
                 await self.session.prepare()
             self.assertEqual(self.session.preflight["state"], "failed")
 
-    async def test_corrupt_sampled_late_segment_rejects_before_launch(self):
+    async def test_late_segments_do_not_delay_startup_but_are_checked_before_delivery(
+        self,
+    ):
         self.data["video5.m4s"] = b"broken video"
+        await self.session.prepare()
+        self.assertNotIn(
+            BASE + "video5.m4s",
+            [call.args[0] for call in self.fetcher.get.await_args_list],
+        )
+        _, keys = self.session.rewrite(self.data["video.m3u8"], BASE + "video.m3u8")
         with self.assertRaises(ValueError):
-            await self.session.prepare()
+            await self.session.get(keys[5])
 
     async def test_corrupt_unsampled_segment_is_not_served_and_evicted_media_is_rechecked(
         self,
@@ -301,3 +309,35 @@ video.m3u8
     async def test_invalid_probe_data(self):
         with self.assertRaises(ValueError):
             await probe(b"not media", "ffprobe")
+
+    async def test_timestamp_start_validates_target_and_does_not_download_the_beginning(
+        self,
+    ):
+        self.session.start_seconds = 3
+        self.data["video0.m4s"] = b"broken, but outside the requested playback window"
+        await self.session.prepare()
+        fetched = [call.args[0] for call in self.fetcher.get.await_args_list]
+        self.assertIn(BASE + "video3.m4s", fetched)
+        self.assertNotIn(BASE + "video0.m4s", fetched)
+        self.assertEqual(self.session.preflight["start_seconds"], 3)
+        # Moving backwards still validates that part of the movie.
+        _, keys = self.session.rewrite(self.data["video.m3u8"], BASE + "video.m3u8")
+        with self.assertRaises(ValueError):
+            await self.session.get(keys[0])
+
+    async def test_audio_and_video_startup_fetches_overlap(self):
+        original = self.fetcher.get.side_effect
+        video, audio = asyncio.Event(), asyncio.Event()
+
+        async def fetch(url, *args, **kwargs):
+            if url.endswith("video0.m4s"):
+                video.set()
+                await asyncio.wait_for(audio.wait(), 1)
+            elif url.endswith("audio0.m4s"):
+                audio.set()
+                await asyncio.wait_for(video.wait(), 1)
+            return await original(url, *args, **kwargs)
+
+        self.fetcher.get.side_effect = fetch
+        await self.session.prepare()
+        self.assertTrue(video.is_set() and audio.is_set())

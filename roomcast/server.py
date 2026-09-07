@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -63,6 +64,17 @@ class Service:
         self.job = None
         self.monitor = None
         self.job_state = {"state": "idle"}
+        self.stage_started = time.monotonic()
+
+    def stage(self, state):
+        now = time.monotonic()
+        timings = self.job_state.setdefault("timings", {})
+        previous = self.job_state["state"]
+        timings[previous] = round(
+            timings.get(previous, 0) + now - self.stage_started, 3
+        )
+        self.job_state["state"] = state
+        self.stage_started = now
 
     async def stop_monitor(self):
         if self.monitor:
@@ -151,6 +163,7 @@ class Service:
         started = time.monotonic()
         start = body.get("start_seconds", 0)
         self.job_state = {"state": "resolving", "started_at": time.time()}
+        self.stage_started = started
         candidate = None
         failures = []
         try:
@@ -158,9 +171,9 @@ class Service:
                 if self.session:
                     await self.session.close()
                     self.session = None
-                self.job_state["state"] = "launching"
+                self.stage("launching")
                 await self.roku.launch_youtube(body["id"])
-                self.job_state["state"] = "verifying"
+                self.stage("verifying")
                 before = await self.roku.confirm(app_id="837")
                 if start:
                     check_position(start, before.get("duration_ms", 0) / 1000)
@@ -171,6 +184,7 @@ class Service:
                         start, before, started=seek_started
                     )
                     self.job_state["seek"] = result
+                self.stage("playing")
                 self.job_state.update(
                     state="playing",
                     provider="YouTube",
@@ -195,21 +209,26 @@ class Service:
                         title=resolved["title"], provider=resolved["provider"]
                     )
                     for source in resolved["sources"]:
-                        self.job_state["state"] = "preparing"
+                        self.stage("preparing")
                         candidate = Session(
                             self.fetcher,
                             self.config,
                             source,
                             resolved["headers"],
                             resolved["title"],
+                            start_seconds=start,
                         )
                         try:
                             try:
                                 await self.prepare(candidate)
                             finally:
                                 self.job_state["preflight"] = candidate.preflight
+                            files = resolved.get("subtitles", {}).get(source, [])
+                            preferred = choose(files, self.config.subtitle_language)
                             candidate.subtitle_tracks.extend(
-                                resolved.get("subtitles", {}).get(source, [])[:8]
+                                sorted(files, key=lambda track: track is not preferred)[
+                                    :8
+                                ]
                             )
                             subtitle_params = None
                             if self.config.roku_subtitle_control:
@@ -261,7 +280,7 @@ class Service:
                             previous, self.session = self.session, candidate
                             if previous:
                                 await previous.close()
-                            self.job_state["state"] = "launching"
+                            self.stage("launching")
                             await self.roku.launch(
                                 candidate.link(candidate.root),
                                 candidate.title,
@@ -271,8 +290,16 @@ class Service:
                                     if subtitle_params
                                     else {}
                                 ),
+                                **(
+                                    {
+                                        "report_url": f"{self.config.public_base}/player-state/{candidate.token}"
+                                    }
+                                    if self.roku.app_id != "782875"
+                                    else {}
+                                ),
                             )
-                            self.job_state["state"] = "verifying"
+                            self.stage("verifying")
+                            verification_started = time.monotonic()
 
                             def delivered():
                                 if candidate.failure:
@@ -287,6 +314,14 @@ class Service:
                                 self.job_state.update(
                                     start_seconds=start,
                                     actual_seconds=state["position_ms"] / 1000,
+                                )
+                            self.stage("playing")
+                            if "first_av_seconds" in self.roku.confirmation:
+                                self.job_state["first_av_seconds"] = round(
+                                    verification_started
+                                    - started
+                                    + self.roku.confirmation["first_av_seconds"],
+                                    3,
                                 )
                             self.job_state.update(
                                 state="playing",
@@ -310,7 +345,7 @@ class Service:
                             candidate = None
                             if isinstance(error, InvalidPosition):
                                 raise
-                    self.job_state["state"] = "resolving"
+                    self.stage("resolving")
             raise ValueError(
                 "sources failed: " + "; ".join(failures)
                 if failures
@@ -332,8 +367,29 @@ class Service:
             )
 
     async def start_play(self, request):
+        wait = request.query.get("wait", "false")
+        if wait not in ("true", "false"):
+            raise ValueError("wait must be true or false")
         async with self.control_lock:
-            return await self._start_play(request)
+            response = await self._start_play(request)
+            job = self.job
+        if wait == "false":
+            return response
+        # Waiting clients do not hold the control lock. Stop can still cancel
+        # startup; a disconnected client does not cancel accepted playback.
+        try:
+            await asyncio.shield(job)
+        except asyncio.CancelledError:
+            if job.cancelled():
+                raise web.HTTPConflict(
+                    text="playback cancelled by stop or home"
+                ) from None
+            raise
+        if self.job is not job:
+            raise web.HTTPConflict(text="playback replaced by another request")
+        return web.json_response(
+            self.job_state, status=200 if self.job_state["state"] == "playing" else 502
+        )
 
     async def _start_play(self, request):
         body = await request.json()
@@ -407,6 +463,7 @@ class Service:
         result["subtitles"] = self.subtitle_status()
         if self.session:
             result["preflight"] = self.session.preflight
+            result["player"] = self.session.player_report
             result["relay"] = {
                 **self.session.metrics,
                 "cache_bytes": self.session.cache_size,
@@ -581,8 +638,8 @@ class Service:
             request.remote != address
             or not session
             or session.closed
-            or request.match_info["token"] != session.token
             or time.monotonic() - session.created > self.config.session_seconds
+            or request.match_info["token"] != session.token
         ):
             raise web.HTTPNotFound()
         body = await request.json()
@@ -740,6 +797,8 @@ class Service:
                         target, before, started=started
                     )
                 else:
+                    if self.session:
+                        self.session.prime(target)
                     result = await self.roku.seek_to(target, before)
             self.job_state.pop("seek_error", None)
             self.job_state.update(
@@ -785,7 +844,7 @@ class Service:
             raise web.HTTPConflict(text="wait for playback or stop the pending request")
         return web.json_response(await self.roku.command(command))
 
-    async def media(self, request):
+    def media_session(self, request):
         if self.network and request.remote != self.network.address:
             raise web.HTTPNotFound()
         session = self.session
@@ -793,8 +852,35 @@ class Service:
             session is None
             or request.match_info["token"] != session.token
             or session.closed
+            or time.monotonic() - session.created > self.config.session_seconds
         ):
             raise web.HTTPNotFound()
+        return session
+
+    async def player_report(self, request):
+        session = self.media_session(request)
+        if request.remote != (
+            self.network.address if self.network else self.config.roku_ip
+        ):
+            raise web.HTTPNotFound()
+        report = await request.json()
+        fields = {"startup_seconds", "manifest_seconds", "buffer_seconds"}
+        if (
+            not isinstance(report, dict)
+            or "startup_seconds" not in report
+            or set(report) - fields
+            or any(
+                type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 120
+                for v in report.values()
+            )
+        ):
+            raise ValueError("invalid player timing report")
+        if session.player_report is None:
+            session.player_report = report
+        return web.Response(status=204)
+
+    async def media(self, request):
+        session = self.media_session(request)
         key = request.match_info["key"]
         if key not in session.resources:
             raise web.HTTPNotFound()
@@ -836,10 +922,13 @@ class Service:
 
     @staticmethod
     def record_delivery(session, key):
-        role = session.resources[key].role
+        resource = session.resources[key]
+        role = resource.role if resource.duration else None
         session.delivered.update(
             ("video", "audio") if role == "muxed" else (role,) if role else ()
         )
+        if resource.duration:
+            session.prefetch(session.following.get(key, []))
 
     async def close(self):
         await self.stop_monitor()
@@ -878,6 +967,7 @@ async def serve(config):
         [
             web.get("/media/{token}/{key}", service.media),
             web.post("/subtitle-state/{token}", service.subtitle_report),
+            web.post("/player-state/{token}", service.player_report),
         ]
     )
     runners = [

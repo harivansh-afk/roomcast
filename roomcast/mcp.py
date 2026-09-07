@@ -25,8 +25,11 @@ async def play(
     replace: bool = False,
     source: str = "cinejoy",
     start_seconds: int = 0,
+    wait: bool = True,
 ) -> dict:
-    """Start an episode, movie, YouTube video or captured browser stream. Poll status; queued is not confirmation.
+    """Play an episode, movie, YouTube video or captured browser stream. By default
+    returns after verified playback, or raises an error. Set wait=False to queue
+    in the background, then poll status; queued is not confirmation.
 
     Set replace only when the user intends to interrupt current viewing.
     start_seconds is an absolute timestamp (1200 = 20 minutes). Nonzero starts
@@ -45,6 +48,7 @@ async def play(
             "source": source,
             "start_seconds": start_seconds,
         },
+        params={"wait": "true" if wait else "false"},
     )
 
 

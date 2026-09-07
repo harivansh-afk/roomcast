@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="Player" extends="Scene">
+    <interface>
+        <field id="request" type="assocarray" alwaysNotify="true" onChange="handleRequest" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/components/Player.brs" />
+    <script type="text/brightscript" uri="pkg:/components/subtitleState.brs" />
+    <children>
+        <Label id="message" text="Roomcast" translation="[60,60]" width="1160" wrap="true" />
+        <Video id="video" width="1280" height="720" visible="false" />
+        <Timer id="subtitleTimer" duration="0.25" repeat="true" />
+    </children>
+</component>

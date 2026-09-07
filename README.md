@@ -1,7 +1,7 @@
 # Roomcast
 
 Text an agent to play a movie or episode on a Roku. Roomcast finds a stream in an
-isolated browser, serves it over the LAN, and opens Media Assistant on the TV.
+isolated browser, serves it over the LAN, and opens the player on the TV.
 It copies compressed video/audio rather than recording the desktop or encoding
 new video. The Roku app need not already be open.
 
@@ -30,9 +30,10 @@ roomcast resume
 roomcast stop
 ```
 
-Play is asynchronous. A `queued` response means accepted, not playing. Poll status
-until `job.state` is `playing` or `failed`; `roku.state` is the current playback
-state. Verification requires the intended app and player, both audio and video
+CLI and MCP play calls wait for verified playback by default and return an error
+if startup fails. Use `--no-wait` (MCP `wait=False`) for background startup, then
+poll status until `job.state` is `playing` or `failed`. `queued` only means accepted.
+`roku.state` is the current playback state. Verification requires the intended app and player, both audio and video
 formats, progressing playback and delivery from the new session. Playback is
 monitored after startup; paused, buffering, ended and failed states remain visible. Starting a new title while something is playing
 requires `--replace`.
@@ -64,7 +65,7 @@ roomcast subtitles --language hi
 ```
 
 The MCP tool is `subtitles(enabled=True, language="en")`; call it without arguments
-to list tracks and reported player state. Install Roomcast Player 1.3.5 for native
+to list tracks and reported player state. Install Roomcast Player 1.4.0 for native
 track matching and subtitle confirmation.
 Sources without supported subtitles are reported as unavailable.
 
@@ -161,19 +162,30 @@ across play requests. Site changes still require adapter maintenance. Expiry dur
 an already-playing session currently requires a new play request; seamless URL
 renewal and resume are not implemented.
 
-There is one active playback session. Responses share an LRU cache capped at
+There is one active playback session. Startup checks the segment at the requested
+position, with separate audio/video prepared concurrently. It then prepares up to
+two following segments per track while Roku starts. Each actual media request
+advances this window; seeking prepares the target window immediately. Every
+segment is validated before delivery, including after cache eviction.
+
+Responses share an LRU cache capped at
 128 MiB; four upstream jobs and two remux processes may run at once. Each media
 object is capped at 32 MiB. Remux processes have a ten-second deadline, and
 complete-segment validation has a twenty-second deadline. A session
-expires after six hours. Stop invalidates its token and cancels its work. The
-first two segments of a requested media playlist are prefetched. Further segments
-are fetched when Roku asks, so the entire episode is not downloaded upfront.
+expires after six hours. Stop invalidates its token and cancels its work.
+Speculation is capped at four queued jobs, two running, leaving capacity for
+requests from the TV. Prefetch never recursively downloads the rest of the movie.
 
 The full VOD playlist remains available for Roku's native seek UI, including
 positions before a requested start timestamp. Recovery after upstream URL expiry
 and persistent resume positions are not implemented yet.
 Pause/resume and stop are supported.
 A service restart ends the relay session; request playback again.
+
+`status` includes startup stage timings, the first observed audio/video playback,
+and cumulative fetch, validation and remux work. Roomcast Player 1.4.0 additionally
+reports native TV startup, manifest and buffering times. These distinguish TV
+buffering from source lookup and relay work. See [architecture](docs/architecture.md).
 
 ## Browser isolation
 

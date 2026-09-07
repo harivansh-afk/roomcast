@@ -22,6 +22,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             [
                 web.post("/play", self.service.start_play),
                 web.post("/command/{command}", self.service.command),
+                web.post("/player-state/{token}", self.service.player_report),
                 web.get("/media/{token}/{key}", self.service.media),
             ]
         )
@@ -59,6 +60,64 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.service.roku.launch.assert_not_awaited()
         self.assertEqual(self.service.job_state["state"], "stopped")
+
+    async def test_waiting_play_releases_control_lock_so_stop_can_cancel_it(self):
+        entered = asyncio.Event()
+
+        async def resolve(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+            yield
+
+        self.service.resolver.resolve = resolve
+        self.service.roku.launch = AsyncMock()
+        waiting = asyncio.create_task(
+            self.client.post("/play?wait=true", json={"kind": "tv", "id": 1})
+        )
+        await asyncio.wait_for(entered.wait(), 1)
+        response = await asyncio.wait_for(self.client.post("/command/stop"), 1)
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await asyncio.wait_for(waiting, 1)).status, 409)
+        self.service.roku.launch.assert_not_awaited()
+
+    async def test_wait_returns_verified_result_and_failure_status(self):
+        for state, code in (("playing", 200), ("failed", 502)):
+
+            async def play(body):
+                self.service.job_state = {"state": state}
+
+            self.service.play = play
+            response = await self.client.post(
+                "/play?wait=true", json={"kind": "tv", "id": 1}
+            )
+            self.assertEqual(response.status, code)
+            self.assertEqual((await response.json())["state"], state)
+
+    async def test_player_timings_require_paired_tv_live_session_and_finite_values(
+        self,
+    ):
+        from types import SimpleNamespace
+
+        session = Session(AsyncMock(), config(), BASE + "main.m3u8", {}, "test")
+        self.service.session = session
+        self.service.network = SimpleNamespace(address="127.0.0.1")
+        path = f"/player-state/{session.token}"
+        for report in (
+            {},
+            {"startup_seconds": True},
+            {"startup_seconds": -1},
+            {"startup_seconds": 121},
+            {"startup_seconds": 1, "url": "secret"},
+        ):
+            self.assertEqual((await self.client.post(path, json=report)).status, 400)
+        good = {"startup_seconds": 1.25, "manifest_seconds": 0.1, "buffer_seconds": 1.1}
+        self.assertEqual((await self.client.post(path, json=good)).status, 204)
+        self.assertEqual(session.player_report, good)
+        self.service.network.address = "10.0.0.2"
+        self.assertEqual((await self.client.post(path, json=good)).status, 404)
+        self.service.network.address = "127.0.0.1"
+        session.created -= 22000
+        self.assertEqual((await self.client.post(path, json=good)).status, 404)
 
     async def test_invalid_command_is_rejected(self):
         response = await self.client.post("/command/PowerOff")

@@ -149,6 +149,6 @@ class RokuTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch("roomcast.roku.asyncio.sleep", new=AsyncMock()):
                 result = await roku.confirm(delivered=lambda: position >= 5000)
-            self.assertEqual(result["position_ms"], 6000)
+            self.assertEqual(result["position_ms"], 7000)
         finally:
             await roku.close()

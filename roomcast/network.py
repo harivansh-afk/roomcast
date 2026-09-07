@@ -89,6 +89,8 @@ class Network:
 
     async def select(self, address):
         local = await self.route(address)
+        if (self.address, self.local_address) == (address, local):
+            return address
         self.address, self.local_address = address, local
         self.roku.base = f"http://{address}:8060"
         path = Path(self.config.address_cache)
