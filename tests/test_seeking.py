@@ -324,7 +324,7 @@ class RokuSeekingTests(unittest.IsolatedAsyncioTestCase):
             patch("roomcast.roku.time", SimpleNamespace(monotonic=lambda: clock[0])),
             self.assertRaisesRegex(ValueError, "did not confirm"),
         ):
-            await self.roku.confirm_seek(105, playback(), seconds=0.04)
+            await self.roku.confirm_seek(105, playback(), seconds=0.5)
         self.assertGreater(clock[0], 7)
 
     async def test_wrong_landing_missing_tracks_stall_and_resumed_pause_never_confirm(
