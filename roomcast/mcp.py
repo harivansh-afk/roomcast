@@ -2,11 +2,11 @@
 
 from typing import Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .client import Command, Kind, call, default_socket
 
-app = FastMCP("roomcast")
+app = MCPServer("roomcast")
 SOCKET = default_socket()
 
 
