@@ -1,6 +1,6 @@
 {
   description = "Roomcast: local Roku playback";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/3e41b24abd260e8f71dbe2f5737d24122f972158";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/5d2b81a7a3be3e2f832879028e4d60abbf58e9a0";
   outputs =
     { self, nixpkgs }:
     let
